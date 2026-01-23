@@ -94,13 +94,9 @@ class LangGraphAgent(BaseAgent):
         Returns:
             Dictionary containing lead information
         """
-        try:
-            return self.sheets_service.create_lead(
-                user_id=user_id,
-                username=username,
-                message=message,
-            )
-        except Exception as e:
-            logger.error(f"Error creating lead: {e}")
-            raise
+        return self.sheets_service.create_lead(
+            user_id=user_id,
+            username=username,
+            message=message,
+        )
 

@@ -18,10 +18,16 @@ logger = logging.getLogger(__name__)
 
 def main():
     """Main function to start the Discord bot."""
-    # Validate configuration
+    # Validate basic configuration
     if not Config.validate():
         logger.error("Missing required configuration. Please check your .env file.")
         logger.error("Required: GOOGLE_API_KEY, DISCORD_BOT_TOKEN, GOOGLE_SHEETS_ID")
+        sys.exit(1)
+    
+    # Validate Google Sheets authentication
+    is_valid, error_msg = Config.validate_sheets_auth()
+    if not is_valid:
+        logger.error(error_msg)
         sys.exit(1)
     
     # Create and run bot
@@ -29,7 +35,21 @@ def main():
     try:
         bot.run(Config.DISCORD_BOT_TOKEN)
     except Exception as e:
-        logger.error(f"Failed to start bot: {e}")
+        error_message = str(e)
+        if "privileged intents" in error_message.lower():
+            logger.error("Failed to start bot: Privileged intents are required but not enabled.")
+            logger.error("")
+            logger.error("To fix this issue:")
+            logger.error("1. Go to https://discord.com/developers/applications/")
+            logger.error("2. Select your bot application")
+            logger.error("3. Navigate to the 'Bot' section in the left sidebar")
+            logger.error("4. Scroll down to 'Privileged Gateway Intents'")
+            logger.error("5. Enable 'MESSAGE CONTENT INTENT'")
+            logger.error("6. Save changes and restart the bot")
+            logger.error("")
+            logger.error(f"Technical details: {e}")
+        else:
+            logger.error(f"Failed to start bot: {e}")
         sys.exit(1)
 
 

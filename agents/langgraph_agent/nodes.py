@@ -39,28 +39,20 @@ class AgentNodes:
             logger.info(f"Lead already created for user {state['user_id']}")
             return {"lead_created": True}
         
+        messages = state.get("messages", [])
+        if not messages:
+            logger.warning("No messages in state to create lead")
+            return {"lead_created": False}
+        
         try:
-            messages = state.get("messages", [])
-            if not messages:
-                logger.warning("No messages in state to create lead")
-                return {"lead_created": False}
-            
-            # Get the first user message
             first_message = messages[0].get("content", "") if messages else ""
-            
-            # Create lead in Google Sheets
-            lead_data = self.sheets_service.create_lead(
+            self.sheets_service.create_lead(
                 user_id=state["user_id"],
                 username=state["username"],
                 message=first_message,
             )
-            
             logger.info(f"Successfully created lead for {state['username']}")
-            return {
-                "lead_created": True,
-                "current_step": "greeting",
-            }
-            
+            return {"lead_created": True, "current_step": "greeting"}
         except Exception as e:
             logger.error(f"Error creating lead: {e}")
             return {"lead_created": False}
@@ -74,12 +66,11 @@ class AgentNodes:
         Returns:
             Updated state with AI response
         """
+        messages = state.get("messages", [])
+        if not messages:
+            return {}
+        
         try:
-            messages = state.get("messages", [])
-            if not messages:
-                return {}
-            
-            # Convert messages to LangChain format
             langchain_messages = []
             for msg in messages:
                 if msg.get("role") == "user":
@@ -87,27 +78,21 @@ class AgentNodes:
                 elif msg.get("role") == "assistant":
                     langchain_messages.append(AIMessage(content=msg.get("content", "")))
             
-            # Add system context
             system_prompt = self._get_system_prompt()
             langchain_messages.insert(0, HumanMessage(content=system_prompt))
             
-            # Get response from LLM
             response = self.llm.invoke(langchain_messages)
             
-            # Add assistant response to messages
-            new_messages = messages + [{
-                "role": "assistant",
-                "content": response.content,
-            }]
-            
             return {
-                "messages": new_messages,
+                "messages": messages + [{
+                    "role": "assistant",
+                    "content": response.content,
+                }],
             }
-            
         except Exception as e:
             logger.error(f"Error processing message: {e}")
             return {
-                "messages": state.get("messages", []) + [{
+                "messages": messages + [{
                     "role": "assistant",
                     "content": "I apologize, but I encountered an error. Please try again.",
                 }],

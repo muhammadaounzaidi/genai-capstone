@@ -20,8 +20,10 @@ class GroomingBot(commands.Bot):
             agent_type: Type of agent to use ("langgraph" or "mcp" in future)
         """
         intents = discord.Intents.default()
+        # message_content is a privileged intent required for reading message content in DMs
+        # This must be enabled in the Discord Developer Portal:
+        # https://discord.com/developers/applications/
         intents.message_content = True
-        intents.members = True
         
         super().__init__(command_prefix="!", intents=intents)
         
@@ -68,37 +70,22 @@ class GroomingBot(commands.Bot):
         if isinstance(message.channel, discord.DMChannel) or self.user.mentioned_in(message):
             try:
                 user_id = str(message.author.id)
-                username = message.author.name
-                message_content = message.content
-                
-                # Get conversation history for this user
                 conversation_history = self.conversations.get(user_id, [])
                 
-                # Process message through agent
                 result = await self.agent.process_message(
                     user_id=user_id,
-                    username=username,
-                    message=message_content,
+                    username=message.author.name,
+                    message=message.content,
                     conversation_history=conversation_history,
                 )
                 
-                # Get response
                 response = result.get("response", "I'm here to help!")
                 
-                # Update conversation history
-                conversation_history.append({
-                    "role": "user",
-                    "content": message_content,
-                })
-                conversation_history.append({
-                    "role": "assistant",
-                    "content": response,
-                })
+                conversation_history.append({"role": "user", "content": message.content})
+                conversation_history.append({"role": "assistant", "content": response})
                 self.conversations[user_id] = conversation_history
                 
-                # Send response
                 await message.channel.send(response)
-                
             except Exception as e:
                 logger.error(f"Error processing message: {e}")
                 await message.channel.send(
