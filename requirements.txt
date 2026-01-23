@@ -1,0 +1,10 @@
+langchain
+langchain-google-genai
+langchain-community
+langgraph
+python-dotenv
+discord.py
+gspread
+google-auth
+google-auth-httplib2
+google-api-python-client
