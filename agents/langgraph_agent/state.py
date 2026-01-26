@@ -10,6 +10,7 @@ class AgentState(TypedDict):
     lead_created: bool
     current_step: str
     collected_info: dict
+    lead_qualified: bool
     service_selected: Optional[str]
     appointment_details: Optional[dict]
 

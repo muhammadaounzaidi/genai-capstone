@@ -22,11 +22,13 @@ def create_agent_graph(sheets_service: GoogleSheetsService):
     # Add nodes
     workflow.add_node("create_lead", nodes.create_lead_node)
     workflow.add_node("process_message", nodes.process_message_node)
+    workflow.add_node("qualify_lead", nodes.qualify_lead_node)
     
     # Define the flow
     workflow.set_entry_point("create_lead")
     workflow.add_edge("create_lead", "process_message")
-    workflow.add_edge("process_message", END)
+    workflow.add_edge("process_message", "qualify_lead")
+    workflow.add_edge("qualify_lead", END)
     
     # Compile the graph
     app = workflow.compile()

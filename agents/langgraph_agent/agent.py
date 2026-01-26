@@ -58,6 +58,7 @@ class LangGraphAgent(BaseAgent):
                 "lead_created": not is_first_message,  # Lead already created if not first message
                 "current_step": "initiated" if is_first_message else "conversation",
                 "collected_info": {},
+                "lead_qualified": False,
                 "service_selected": None,
                 "appointment_details": None,
             }
