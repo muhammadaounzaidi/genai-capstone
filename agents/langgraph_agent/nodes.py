@@ -280,14 +280,14 @@ If you cannot extract at least the user's name and phone, return the string "nul
         return text.strip()
     
     def _get_system_prompt(self) -> str:
-        """Get the system prompt for the agent."""
-        return """You are a friendly and professional assistant for Pawsitive Grooming, a pet grooming business. 
+        """Get the system prompt for the agent, including current services from the Services sheet."""
+        base = """You are a friendly and professional assistant for Pawsitive Grooming, a pet grooming business. 
 Your role is to:
 1. Greet customers warmly with a friendly greeting like: "Hello there! Welcome to Pawsitive Grooming! I'm happy to help you today."
 2. Qualify leads by collecting:
    - Customer's name and phone number
    - Pet details: breed, weight, age, and coat type
-3. Provide information about available services and prices
+3. Provide information about available services and prices (use ONLY the services list below)
 4. Help book appointments
 
 IMPORTANT: You must collect the following information to qualify a lead:
@@ -305,3 +305,30 @@ CRITICAL: Never use placeholder text, brackets, or any template variables like [
 Be conversational, helpful, and professional. Ask one question at a time to avoid overwhelming the customer.
 Keep responses concise and friendly. Once you have collected all the required information, confirm with the customer."""
 
+        services_text = self._format_services_for_prompt()
+        if services_text:
+            base += "\n\nAVAILABLE SERVICES (use these exact names, durations, and prices when discussing services):\n" + services_text
+        return base
+
+    def _format_services_for_prompt(self) -> str:
+        """Fetch services from the Services sheet and format for the system prompt."""
+        services = self.sheets_service.get_services()
+        if not services:
+            return ""
+        lines = []
+        for record in services:
+            # Support common column names (case-insensitive via .get)
+            name = (
+                record.get("name") or record.get("service") or record.get("service_name")
+                or record.get("Name") or record.get("Service") or ""
+            )
+            duration = record.get("duration") or record.get("Duration") or ""
+            price = record.get("price") or record.get("Price") or ""
+            if name:
+                parts = [f"- {name}"]
+                if price:
+                    parts.append(str(price))
+                if duration:
+                    parts.append(f"— {duration}")
+                lines.append(" ".join(parts))
+        return "\n".join(lines) if lines else ""

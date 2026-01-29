@@ -340,6 +340,33 @@ class GoogleSheetsService:
         # Return the string representation which usually contains the error message
         return error_str if error_str else f"APIError: {type(error).__name__}"
     
+    def get_services(self) -> list:
+        """Read services from the Services sheet (name, duration, price).
+        
+        Returns:
+            List of dicts with keys: name, duration, price (or as per sheet headers).
+            Empty list if sheet not found or on error.
+        """
+        try:
+            spreadsheet = self.client.open_by_key(self.sheets_id)
+            services_sheet = spreadsheet.worksheet("Services")
+        except gspread.exceptions.WorksheetNotFound:
+            logger.warning("Services worksheet not found")
+            return []
+        except Exception as e:
+            logger.error(f"Error opening Services sheet: {e}")
+            return []
+        
+        try:
+            records = services_sheet.get_all_records()
+            if not records:
+                return []
+            return list(records)
+        except Exception as e:
+            logger.error(f"Error reading Services sheet: {e}")
+            logger.error(f"Traceback: {traceback.format_exc()}")
+            return []
+    
     def _get_service_account_email(self) -> Optional[str]:
         """Get the service account email from credentials.
         
