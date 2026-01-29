@@ -3,12 +3,22 @@ import json
 import logging
 import os
 import traceback
+import uuid
 from datetime import datetime
-from typing import Dict, Optional
+from typing import Dict, List, Optional
 import gspread
 from google.oauth2.service_account import Credentials
 
 logger = logging.getLogger(__name__)
+
+LEADS_HEADERS = [
+    "lead_id", "created_at_iso", "source", "discord_user_id",
+    "name", "phone", "city", "status"
+]
+PETS_HEADERS = [
+    "lead_id", "pet_id", "pet_name", "species", "breed",
+    "weight_kg", "age_years", "coat_condition", "notes"
+]
 
 
 class GoogleSheetsService:
@@ -56,42 +66,32 @@ class GoogleSheetsService:
         logger.error(error_msg)
         raise ValueError(error_msg)
     
+    def _get_or_create_sheet(self, spreadsheet, title: str, headers: List[str]):
+        """Get worksheet by title, or create it with the given headers if missing."""
+        try:
+            return spreadsheet.worksheet(title)
+        except gspread.exceptions.WorksheetNotFound:
+            logger.info(f"Worksheet '{title}' not found, creating it with headers")
+            sheet = spreadsheet.add_worksheet(title=title, rows=1000, cols=len(headers) + 5)
+            sheet.append_row(headers)
+            return sheet
+
+    def _ensure_leads_and_pets_sheets(self, spreadsheet) -> None:
+        """Create Leads and Pets sheets with headers if they do not exist."""
+        self._get_or_create_sheet(spreadsheet, "Leads", LEADS_HEADERS)
+        self._get_or_create_sheet(spreadsheet, "Pets", PETS_HEADERS)
+    
     def create_lead(self, user_id: str, username: str, message: str) -> Dict:
         """Create a new lead record in the Leads sheet.
         
         Args:
             user_id: Discord user ID
-            username: Discord username
-            message: Initial message from user
+            username: Discord username (for logging; not stored in new schema)
+            message: Initial message from user (for logging; not stored in new schema)
             
         Returns:
-            Dictionary with lead information
+            Dictionary with lead information (lead_id, created_at_iso, source, discord_user_id, name, phone, city, status)
         """
-        # Check if lead already exists
-        if self.lead_exists(user_id):
-            logger.info(f"Lead already exists for user_id {user_id}, skipping creation")
-            try:
-                spreadsheet = self.client.open_by_key(self.sheets_id)
-                leads_sheet = spreadsheet.worksheet("Leads")
-                cells = leads_sheet.findall(user_id)
-                if cells:
-                    # Return existing lead data
-                    row = cells[0].row
-                    headers = leads_sheet.row_values(1)
-                    row_values = leads_sheet.row_values(row)
-                    lead_data = dict(zip(headers, row_values))
-                    return lead_data
-            except gspread.exceptions.APIError as e:
-                error_msg = self._extract_api_error_message(e)
-                logger.error(f"Google Sheets API error retrieving existing lead for user_id {user_id}: {error_msg}")
-                self._log_permission_help()
-                raise
-            except PermissionError as e:
-                error_msg = str(e) if str(e) else f"PermissionError: {type(e).__name__}"
-                logger.error(f"Permission error retrieving existing lead for user_id {user_id}: {error_msg}")
-                self._log_permission_help()
-                raise
-        
         try:
             spreadsheet = self.client.open_by_key(self.sheets_id)
         except gspread.exceptions.APIError as e:
@@ -104,55 +104,30 @@ class GoogleSheetsService:
             logger.error(f"Permission error creating lead for user_id {user_id}: {error_msg}")
             self._log_permission_help()
             raise
-        
-        try:
-            leads_sheet = spreadsheet.worksheet("Leads")
-        except gspread.exceptions.WorksheetNotFound:
-            logger.info("Leads worksheet not found, creating it")
-            leads_sheet = spreadsheet.add_worksheet(title="Leads", rows=1000, cols=15)
-            headers = [
-                "user_id", "username", "status", "initial_message", "timestamp",
-                "name", "phone", "pet_breed", "pet_weight", "pet_age", "pet_coat"
-            ]
-            leads_sheet.append_row(headers)
-        
-        self._ensure_qualification_headers(leads_sheet)
-        
-        timestamp = datetime.now().isoformat()
-        lead_data = {
-            "user_id": user_id,
-            "username": username,
-            "status": "initiated",
-            "initial_message": message,
-            "timestamp": timestamp,
-        }
-        
-        headers = leads_sheet.row_values(1)
-        row = []
-        for header in headers:
-            if header == "user_id":
-                # Store user_id as string to ensure consistent searching
-                row.append(str(lead_data["user_id"]))
-            elif header == "username":
-                row.append(lead_data["username"])
-            elif header == "status":
-                row.append(lead_data["status"])
-            elif header == "initial_message":
-                row.append(lead_data["initial_message"])
-            elif header == "timestamp":
-                row.append(lead_data["timestamp"])
-            else:
-                row.append("")
-        
+        self._ensure_leads_and_pets_sheets(spreadsheet)
+
+        leads_sheet = spreadsheet.worksheet("Leads")
+        lead_id = str(uuid.uuid4())
+        created_at_iso = datetime.now().isoformat()
+        row = [
+            lead_id,
+            created_at_iso,
+            "discord",
+            str(user_id),
+            "",
+            "",
+            "",
+            "initiated",
+        ]
         leads_sheet.append_row(row)
-        logger.info(f"Created lead for user {username} (ID: {user_id})")
-        return lead_data
+        logger.info(f"Created lead {lead_id} for discord_user_id {user_id}")
+        return dict(zip(LEADS_HEADERS, row))
     
     def lead_exists(self, user_id: str) -> bool:
-        """Check if a lead exists for the given user_id.
+        """Check if a lead exists for the given discord_user_id.
         
         Args:
-            user_id: Discord user ID
+            user_id: Discord user ID (discord_user_id)
             
         Returns:
             True if lead exists, False otherwise
@@ -160,7 +135,7 @@ class GoogleSheetsService:
         try:
             spreadsheet = self.client.open_by_key(self.sheets_id)
             leads_sheet = spreadsheet.worksheet("Leads")
-            cells = leads_sheet.findall(user_id)
+            cells = leads_sheet.findall(str(user_id))
             return len(cells) > 0
         except gspread.exceptions.WorksheetNotFound:
             return False
@@ -190,19 +165,23 @@ class GoogleSheetsService:
         Returns:
             True if successful, False otherwise
         """
-        spreadsheet = self.client.open_by_key(self.sheets_id)
-        leads_sheet = spreadsheet.worksheet("Leads")
-        
-        cells = leads_sheet.findall(user_id)
-        if not cells:
-            logger.warning(f"Lead not found for user_id: {user_id}")
+        try:
+            spreadsheet = self.client.open_by_key(self.sheets_id)
+            leads_sheet = spreadsheet.worksheet("Leads")
+        except gspread.exceptions.WorksheetNotFound:
             return False
-        
+        headers = leads_sheet.row_values(1)
+        if "status" not in headers:
+            logger.warning("Leads sheet has no 'status' column")
+            return False
+        cells = leads_sheet.findall(str(user_id))
+        if not cells:
+            logger.warning(f"Lead not found for discord_user_id: {user_id}")
+            return False
+        status_col = headers.index("status") + 1
         for cell in cells:
-            row = cell.row
-            leads_sheet.update_cell(row, 3, status)
-        
-        logger.info(f"Updated lead status for user {user_id} to {status}")
+            leads_sheet.update_cell(cell.row, status_col, status)
+        logger.info(f"Updated lead status for discord_user_id {user_id} to {status}")
         return True
     
     def qualify_lead(
@@ -210,104 +189,110 @@ class GoogleSheetsService:
         user_id: str,
         name: Optional[str] = None,
         phone: Optional[str] = None,
+        city: Optional[str] = None,
         pet_breed: Optional[str] = None,
         pet_weight: Optional[str] = None,
         pet_age: Optional[str] = None,
         pet_coat: Optional[str] = None,
+        pet_name: Optional[str] = None,
+        species: Optional[str] = None,
     ) -> bool:
-        """Update lead with qualification details and set status to qualified.
+        """Update lead with qualification details and add pet to Pets sheet.
         
         Args:
             user_id: Discord user ID
             name: User's name
             phone: User's phone number
+            city: User's city (optional)
             pet_breed: Pet's breed
-            pet_weight: Pet's weight
-            pet_age: Pet's age
-            pet_coat: Pet's coat type
+            pet_weight: Pet's weight (stored in weight_kg column as provided)
+            pet_age: Pet's age (stored in age_years as provided)
+            pet_coat: Pet's coat type (stored in coat_condition)
+            pet_name: Pet's name (optional)
+            species: Pet species e.g. dog/cat (optional)
             
         Returns:
             True if successful, False otherwise
         """
         try:
             spreadsheet = self.client.open_by_key(self.sheets_id)
-        except gspread.exceptions.APIError as e:
-            error_msg = self._extract_api_error_message(e)
-            logger.error(f"Google Sheets API error qualifying lead for user_id {user_id}: {error_msg}")
-            self._log_permission_help()
-            return False
-        except PermissionError as e:
-            error_msg = str(e) if str(e) else f"PermissionError: {type(e).__name__}"
-            logger.error(f"Permission error qualifying lead for user_id {user_id}: {error_msg}")
+        except (gspread.exceptions.APIError, PermissionError) as e:
+            logger.error(f"Google Sheets error qualifying lead for user_id {user_id}: {e}")
             self._log_permission_help()
             return False
         
-        try:
-            leads_sheet = spreadsheet.worksheet("Leads")
-        except gspread.exceptions.WorksheetNotFound:
-            logger.error(f"Leads worksheet not found for user_id: {user_id}")
-            return False
-        
-        self._ensure_qualification_headers(leads_sheet)
-        
+        leads_sheet = self._get_or_create_sheet(spreadsheet, "Leads", LEADS_HEADERS)
         headers = leads_sheet.row_values(1)
         if not headers:
             logger.error("Leads sheet has no headers")
             return False
         
-        # Find the lead by user_id
         cells = leads_sheet.findall(str(user_id))
         if not cells:
-            # Fallback: manual search in user_id column
-            if "user_id" in headers:
-                user_id_col = headers.index("user_id") + 1
-                all_values = leads_sheet.col_values(user_id_col)
-                for row_num, cell_value in enumerate(all_values, start=1):
+            discord_col = None
+            for idx, h in enumerate(headers):
+                if h and str(h).strip().lower() == "discord_user_id":
+                    discord_col = idx + 1
+                    break
+            if discord_col:
+                from gspread.cell import Cell
+                all_vals = leads_sheet.col_values(discord_col)
+                cells = []
+                for row_num, val in enumerate(all_vals, start=1):
                     if row_num == 1:
                         continue
-                    if str(cell_value).strip() == str(user_id).strip():
-                        from gspread.cell import Cell
-                        cells = [Cell(row_num, user_id_col, str(user_id))]
-                        break
-        
+                    if str(val).strip() == str(user_id).strip():
+                        cells.append(Cell(row_num, discord_col, str(user_id)))
         if not cells:
-            logger.warning(f"Lead not found for user_id: {user_id}")
+            logger.warning(f"Lead not found for discord_user_id: {user_id}")
             return False
         
-        cell = cells[0]
-        row = cell.row
+        # Use the most recent lead (highest row number) when user has multiple leads
+        row_num = max(cell.row for cell in cells)
+        row_vals = leads_sheet.row_values(row_num)
+        padded = row_vals + [""] * (len(headers) - len(row_vals))
+        lead_row_dict = dict(zip(headers, padded))
+        lead_id = lead_row_dict.get("lead_id", "")
         
-        # Build updates
+        # Update Leads row: name, phone, city, status
         updates = []
         if name is not None and "name" in headers:
-            updates.append((row, headers.index("name") + 1, name))
+            updates.append((row_num, headers.index("name") + 1, name))
         if phone is not None and "phone" in headers:
-            updates.append((row, headers.index("phone") + 1, phone))
-        if pet_breed is not None and "pet_breed" in headers:
-            updates.append((row, headers.index("pet_breed") + 1, pet_breed))
-        if pet_weight is not None and "pet_weight" in headers:
-            updates.append((row, headers.index("pet_weight") + 1, pet_weight))
-        if pet_age is not None and "pet_age" in headers:
-            updates.append((row, headers.index("pet_age") + 1, pet_age))
-        if pet_coat is not None and "pet_coat" in headers:
-            updates.append((row, headers.index("pet_coat") + 1, pet_coat))
+            updates.append((row_num, headers.index("phone") + 1, phone))
+        if city is not None and "city" in headers:
+            updates.append((row_num, headers.index("city") + 1, city))
         if "status" in headers:
-            updates.append((row, headers.index("status") + 1, "qualified"))
+            updates.append((row_num, headers.index("status") + 1, "qualified"))
+        for r, c, v in updates:
+            leads_sheet.update_cell(r, c, v)
         
-        if not updates:
-            logger.warning(f"No updates to apply for user_id: {user_id}")
-            return False
-        
-        # Update cells
-        try:
-            for update_row, update_col, update_value in updates:
-                leads_sheet.update_cell(update_row, update_col, update_value)
-            logger.info(f"Successfully qualified lead for user_id: {user_id}")
-            return True
-        except Exception as e:
-            logger.error(f"Error updating lead for user_id {user_id}: {e}")
-            logger.error(f"Traceback: {traceback.format_exc()}")
-            return False
+        # Only add a pet row when we have at least one pet detail (avoids empty row on first qualification)
+        has_pet_info = any([
+            (pet_name or "").strip(),
+            (species or "").strip(),
+            (pet_breed or "").strip(),
+            (pet_weight or "").strip(),
+            (pet_age or "").strip(),
+            (pet_coat or "").strip(),
+        ])
+        if has_pet_info:
+            pets_sheet = self._get_or_create_sheet(spreadsheet, "Pets", PETS_HEADERS)
+            pet_id = str(uuid.uuid4())
+            pet_row = [
+                lead_id,
+                pet_id,
+                (pet_name or "").strip(),
+                (species or "").strip(),
+                (pet_breed or "").strip(),
+                (pet_weight or "").strip(),
+                (pet_age or "").strip(),
+                (pet_coat or "").strip(),
+                "",
+            ]
+            pets_sheet.append_row(pet_row)
+            logger.info(f"Qualified lead for discord_user_id {user_id}, added pet {pet_id}")
+        return True
     
     def _extract_api_error_message(self, error: gspread.exceptions.APIError) -> str:
         """Extract detailed error message from APIError.
@@ -411,23 +396,4 @@ class GoogleSheetsService:
         logger.error("")
         logger.error("=" * 60)
     
-    def _ensure_qualification_headers(self, leads_sheet) -> None:
-        """Ensure the Leads sheet has all required headers for qualification.
-        
-        Args:
-            leads_sheet: The Leads worksheet object
-        """
-        headers = leads_sheet.row_values(1)
-        required_headers = [
-            "user_id", "username", "status", "initial_message", "timestamp",
-            "name", "phone", "pet_breed", "pet_weight", "pet_age", "pet_coat"
-        ]
-        
-        missing_headers = [h for h in required_headers if h not in headers]
-        if missing_headers:
-            for header in missing_headers:
-                col_index = len(headers) + 1
-                leads_sheet.update_cell(1, col_index, header)
-                headers.append(header)
-            logger.info(f"Added missing headers: {missing_headers}")
 

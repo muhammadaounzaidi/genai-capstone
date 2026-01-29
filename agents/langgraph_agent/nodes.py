@@ -40,12 +40,7 @@ class AgentNodes:
         """
         user_id = state.get("user_id")
         
-        # Check if lead already exists in database
-        if self.sheets_service.lead_exists(user_id):
-            logger.info(f"Lead already exists for user {user_id}")
-            return {"lead_created": True}
-        
-        # Also check state flag (for cases where state is already set)
+        # Skip if we already created a lead this conversation
         if state.get("lead_created", False):
             logger.info(f"Lead already created (from state) for user {user_id}")
             return {"lead_created": True}
@@ -143,10 +138,13 @@ class AgentNodes:
                     user_id=state["user_id"],
                     name=qualification_info.get("name"),
                     phone=qualification_info.get("phone"),
+                    city=qualification_info.get("city"),
                     pet_breed=qualification_info.get("pet_breed"),
                     pet_weight=qualification_info.get("pet_weight"),
                     pet_age=qualification_info.get("pet_age"),
                     pet_coat=qualification_info.get("pet_coat"),
+                    pet_name=qualification_info.get("pet_name"),
+                    species=qualification_info.get("species"),
                 )
                 
                 if success:
@@ -188,9 +186,10 @@ class AgentNodes:
 
 User Information:
 - name: The customer's name
-- phone: The customer's phone number
+- phone: The customer's phone number (include full number as given, e.g. 00112233)
 
 Pet Information:
+- pet_name: The pet's name (e.g. Johnny, Max)
 - pet_breed: The pet's breed (e.g., Golden Retriever, Persian Cat)
 - pet_weight: The pet's weight (e.g., 25 lbs, 10 kg)
 - pet_age: The pet's age (e.g., 3 years, 18 months)
@@ -205,6 +204,7 @@ Use null for any missing information. Example format:
 {{
     "name": "John Doe",
     "phone": "555-1234",
+    "pet_name": "Johnny",
     "pet_breed": "Golden Retriever",
     "pet_weight": "25 lbs",
     "pet_age": "3 years",
@@ -236,6 +236,7 @@ If you cannot extract at least the user's name and phone, return the string "nul
             return {
                 "name": name,
                 "phone": phone,
+                "pet_name": qualification_info.get("pet_name"),
                 "pet_breed": qualification_info.get("pet_breed"),
                 "pet_weight": qualification_info.get("pet_weight"),
                 "pet_age": qualification_info.get("pet_age"),
