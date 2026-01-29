@@ -222,7 +222,6 @@ If you cannot extract at least the user's name and phone, return the string "nul
             
             # Clean the response - remove markdown code blocks if present
             response_text = self._clean_json_response(response_text)
-            
             qualification_info = json.loads(response_text)
             
             if not isinstance(qualification_info, dict):
@@ -232,7 +231,6 @@ If you cannot extract at least the user's name and phone, return the string "nul
             phone = qualification_info.get("phone")
             
             if not name or not phone:
-                logger.info("Insufficient information: name and phone are required")
                 return None
             
             return {

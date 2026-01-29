@@ -131,7 +131,8 @@ class GoogleSheetsService:
         row = []
         for header in headers:
             if header == "user_id":
-                row.append(lead_data["user_id"])
+                # Store user_id as string to ensure consistent searching
+                row.append(str(lead_data["user_id"]))
             elif header == "username":
                 row.append(lead_data["username"])
             elif header == "status":
@@ -254,50 +255,59 @@ class GoogleSheetsService:
             logger.error("Leads sheet has no headers")
             return False
         
-        cells = leads_sheet.findall(user_id)
+        # Find the lead by user_id
+        cells = leads_sheet.findall(str(user_id))
+        if not cells:
+            # Fallback: manual search in user_id column
+            if "user_id" in headers:
+                user_id_col = headers.index("user_id") + 1
+                all_values = leads_sheet.col_values(user_id_col)
+                for row_num, cell_value in enumerate(all_values, start=1):
+                    if row_num == 1:
+                        continue
+                    if str(cell_value).strip() == str(user_id).strip():
+                        from gspread.cell import Cell
+                        cells = [Cell(row_num, user_id_col, str(user_id))]
+                        break
+        
         if not cells:
             logger.warning(f"Lead not found for user_id: {user_id}")
             return False
         
-        user_id_col = headers.index("user_id") + 1 if "user_id" in headers else 1
+        cell = cells[0]
+        row = cell.row
         
-        for cell in cells:
-            if cell.col == user_id_col:
-                row = cell.row
-                
-                updates = {}
-                if name and "name" in headers:
-                    name_col = headers.index("name") + 1
-                    updates[name_col] = name
-                if phone and "phone" in headers:
-                    phone_col = headers.index("phone") + 1
-                    updates[phone_col] = phone
-                if pet_breed and "pet_breed" in headers:
-                    breed_col = headers.index("pet_breed") + 1
-                    updates[breed_col] = pet_breed
-                if pet_weight and "pet_weight" in headers:
-                    weight_col = headers.index("pet_weight") + 1
-                    updates[weight_col] = pet_weight
-                if pet_age and "pet_age" in headers:
-                    age_col = headers.index("pet_age") + 1
-                    updates[age_col] = pet_age
-                if pet_coat and "pet_coat" in headers:
-                    coat_col = headers.index("pet_coat") + 1
-                    updates[coat_col] = pet_coat
-                
-                if "status" in headers:
-                    status_col = headers.index("status") + 1
-                    updates[status_col] = "qualified"
-                
-                if updates:
-                    for col, value in updates.items():
-                        leads_sheet.update_cell(row, col, value)
-                
-                logger.info(f"Qualified lead for user {user_id} with details: name={name}, phone={phone}, breed={pet_breed}, weight={pet_weight}, age={pet_age}, coat={pet_coat}")
-                return True
+        # Build updates
+        updates = []
+        if name is not None and "name" in headers:
+            updates.append((row, headers.index("name") + 1, name))
+        if phone is not None and "phone" in headers:
+            updates.append((row, headers.index("phone") + 1, phone))
+        if pet_breed is not None and "pet_breed" in headers:
+            updates.append((row, headers.index("pet_breed") + 1, pet_breed))
+        if pet_weight is not None and "pet_weight" in headers:
+            updates.append((row, headers.index("pet_weight") + 1, pet_weight))
+        if pet_age is not None and "pet_age" in headers:
+            updates.append((row, headers.index("pet_age") + 1, pet_age))
+        if pet_coat is not None and "pet_coat" in headers:
+            updates.append((row, headers.index("pet_coat") + 1, pet_coat))
+        if "status" in headers:
+            updates.append((row, headers.index("status") + 1, "qualified"))
         
-        logger.warning(f"Could not find matching lead row for user_id: {user_id}")
-        return False
+        if not updates:
+            logger.warning(f"No updates to apply for user_id: {user_id}")
+            return False
+        
+        # Update cells
+        try:
+            for update_row, update_col, update_value in updates:
+                leads_sheet.update_cell(update_row, update_col, update_value)
+            logger.info(f"Successfully qualified lead for user_id: {user_id}")
+            return True
+        except Exception as e:
+            logger.error(f"Error updating lead for user_id {user_id}: {e}")
+            logger.error(f"Traceback: {traceback.format_exc()}")
+            return False
     
     def _extract_api_error_message(self, error: gspread.exceptions.APIError) -> str:
         """Extract detailed error message from APIError.
@@ -391,5 +401,6 @@ class GoogleSheetsService:
             for header in missing_headers:
                 col_index = len(headers) + 1
                 leads_sheet.update_cell(1, col_index, header)
-            logger.info(f"Added missing headers to Leads sheet: {missing_headers}")
+                headers.append(header)
+            logger.info(f"Added missing headers: {missing_headers}")
 
