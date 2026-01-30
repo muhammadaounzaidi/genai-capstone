@@ -12,21 +12,24 @@ logger = logging.getLogger(__name__)
 class LangGraphAgent(BaseAgent):
     """LangGraph-based agent implementation following SRP."""
     
-    def __init__(self, sheets_service: GoogleSheetsService):
+    def __init__(self, sheets_service: GoogleSheetsService, calendar_service=None):
         """Initialize the LangGraph agent.
         
         Args:
             sheets_service: Google Sheets service instance
+            calendar_service: Optional Google Calendar service for booking
         """
         self.sheets_service = sheets_service
-        self.graph = create_agent_graph(sheets_service)
+        self.calendar_service = calendar_service
+        self.graph = create_agent_graph(sheets_service, calendar_service)
     
     async def process_message(
         self,
         user_id: str,
         username: str,
         message: str,
-        conversation_history: list = None
+        conversation_history: list = None,
+        last_state: dict = None,
     ) -> Dict[str, Any]:
         """Process a user message using LangGraph.
         
@@ -35,32 +38,34 @@ class LangGraphAgent(BaseAgent):
             username: Username of the user
             message: The message content from the user
             conversation_history: Optional list of previous messages
+            last_state: Optional state from previous invocation (for lead_qualified, appointment_booked)
             
         Returns:
             Dictionary containing response and state information
         """
         try:
-            # Build messages list
             messages = conversation_history if conversation_history else []
             messages.append({
                 "role": "user",
                 "content": message,
             })
-            
-            # Check if this is the first message (lead needs to be created)
             is_first_message = len(messages) == 1
-            
-            # Create initial state
+            prev = last_state or {}
             state: AgentState = {
                 "user_id": user_id,
                 "username": username,
                 "messages": messages,
-                "lead_created": not is_first_message,  # Lead already created if not first message
-                "current_step": "initiated" if is_first_message else "conversation",
-                "collected_info": {},
-                "lead_qualified": False,
-                "service_selected": None,
-                "appointment_details": None,
+                "lead_created": prev.get("lead_created", not is_first_message),
+                "current_step": prev.get("current_step", "initiated" if is_first_message else "conversation"),
+                "collected_info": prev.get("collected_info", {}),
+                "lead_qualified": prev.get("lead_qualified", False),
+                "pet_added": prev.get("pet_added", False),
+                "service_selected": prev.get("service_selected"),
+                "invalid_service_requested": prev.get("invalid_service_requested", False),
+                "requested_service_name": prev.get("requested_service_name"),
+                "appointment_details": prev.get("appointment_details"),
+                "appointment_booked": prev.get("appointment_booked", False),
+                "available_slots": prev.get("available_slots"),
             }
             
             # Run the agent graph

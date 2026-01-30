@@ -5,6 +5,7 @@ from discord.ext import commands
 from agents.base import BaseAgent
 from agents.langgraph_agent import LangGraphAgent
 from services.google_sheets_service import GoogleSheetsService
+from services.google_calendar_service import GoogleCalendarService
 from config import Config
 
 logger = logging.getLogger(__name__)
@@ -27,17 +28,18 @@ class GroomingBot(commands.Bot):
         
         super().__init__(command_prefix="!", intents=intents)
         
-        # Initialize services
         self.sheets_service = GoogleSheetsService(
             sheets_id=Config.GOOGLE_SHEETS_ID,
             api_key=Config.GOOGLE_API_KEY,
         )
+        self.calendar_service = None
+        if Config.GOOGLE_CALENDAR_ID:
+            self.calendar_service = GoogleCalendarService(calendar_id=Config.GOOGLE_CALENDAR_ID)
         
-        # Initialize agent based on type
         self.agent: BaseAgent = self._create_agent(agent_type)
         
-        # Store conversation history per user
         self.conversations: dict[str, list] = {}
+        self.last_state_by_user: dict[str, dict] = {}
     
     def _create_agent(self, agent_type: str) -> BaseAgent:
         """Create an agent instance based on the specified type.
@@ -49,7 +51,7 @@ class GroomingBot(commands.Bot):
             Agent instance implementing BaseAgent
         """
         if agent_type == "langgraph":
-            return LangGraphAgent(self.sheets_service)
+            return LangGraphAgent(self.sheets_service, self.calendar_service)
         elif agent_type == "mcp":
             # Future: return MCPAgent(self.sheets_service)
             raise NotImplementedError("MCP agent not yet implemented")
@@ -71,15 +73,19 @@ class GroomingBot(commands.Bot):
             try:
                 user_id = str(message.author.id)
                 conversation_history = self.conversations.get(user_id, [])
+                last_state = self.last_state_by_user.get(user_id)
                 
                 result = await self.agent.process_message(
                     user_id=user_id,
                     username=message.author.name,
                     message=message.content,
                     conversation_history=conversation_history,
+                    last_state=last_state,
                 )
                 
                 response = result.get("response", "I'm here to help!")
+                if result.get("state"):
+                    self.last_state_by_user[user_id] = result["state"]
                 
                 conversation_history.append({"role": "user", "content": message.content})
                 conversation_history.append({"role": "assistant", "content": response})

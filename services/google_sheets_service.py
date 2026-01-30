@@ -2,6 +2,8 @@
 import json
 import logging
 import os
+import random
+import string
 import traceback
 import uuid
 from datetime import datetime
@@ -18,6 +20,10 @@ LEADS_HEADERS = [
 PETS_HEADERS = [
     "lead_id", "pet_id", "pet_name", "species", "breed",
     "weight_kg", "age_years", "coat_condition", "notes"
+]
+APPOINTMENTS_HEADERS = [
+    "appt_id", "lead_id", "service_id", "status",
+    "start_iso", "end_iso", "calendar_event_id",
 ]
 
 
@@ -77,9 +83,10 @@ class GoogleSheetsService:
             return sheet
 
     def _ensure_leads_and_pets_sheets(self, spreadsheet) -> None:
-        """Create Leads and Pets sheets with headers if they do not exist."""
+        """Create Leads, Pets, and Appointments sheets with headers if they do not exist."""
         self._get_or_create_sheet(spreadsheet, "Leads", LEADS_HEADERS)
         self._get_or_create_sheet(spreadsheet, "Pets", PETS_HEADERS)
+        self._get_or_create_sheet(spreadsheet, "Appointments", APPOINTMENTS_HEADERS)
     
     def create_lead(self, user_id: str, username: str, message: str) -> Dict:
         """Create a new lead record in the Leads sheet.
@@ -267,7 +274,7 @@ class GoogleSheetsService:
         for r, c, v in updates:
             leads_sheet.update_cell(r, c, v)
         
-        # Only add a pet row when we have at least one pet detail (avoids empty row on first qualification)
+        # Add a pet row when we have at least one pet detail
         has_pet_info = any([
             (pet_name or "").strip(),
             (species or "").strip(),
@@ -276,7 +283,7 @@ class GoogleSheetsService:
             (pet_age or "").strip(),
             (pet_coat or "").strip(),
         ])
-        if has_pet_info:
+        if has_pet_info and lead_id:
             pets_sheet = self._get_or_create_sheet(spreadsheet, "Pets", PETS_HEADERS)
             pet_id = str(uuid.uuid4())
             pet_row = [
@@ -293,6 +300,40 @@ class GoogleSheetsService:
             pets_sheet.append_row(pet_row)
             logger.info(f"Qualified lead for discord_user_id {user_id}, added pet {pet_id}")
         return True
+
+    def _generate_appt_id(self) -> str:
+        """Generate short appointment id like APPT3D8W3Z."""
+        chars = string.ascii_uppercase + string.digits
+        return "APPT" + "".join(random.choices(chars, k=8))
+
+    def create_appointment(
+        self,
+        lead_id: str,
+        start_iso: str,
+        end_iso: str,
+        service_id: str = "SVC001",
+        calendar_event_id: str = "",
+    ) -> Optional[str]:
+        """Append a row to the Appointments sheet. Returns appt_id."""
+        try:
+            spreadsheet = self.client.open_by_key(self.sheets_id)
+        except Exception as e:
+            logger.error(f"Error opening spreadsheet for appointment: {e}")
+            return None
+        appointments_sheet = self._get_or_create_sheet(spreadsheet, "Appointments", APPOINTMENTS_HEADERS)
+        appt_id = self._generate_appt_id()
+        row = [
+            appt_id,
+            lead_id,
+            service_id,
+            "booked",
+            start_iso,
+            end_iso,
+            calendar_event_id,
+        ]
+        appointments_sheet.append_row(row)
+        logger.info(f"Created appointment {appt_id} for lead {lead_id}")
+        return appt_id
     
     def _extract_api_error_message(self, error: gspread.exceptions.APIError) -> str:
         """Extract detailed error message from APIError.
@@ -328,29 +369,82 @@ class GoogleSheetsService:
     def get_services(self) -> list:
         """Read services from the Services sheet (name, duration, price).
         
-        Returns:
-            List of dicts with keys: name, duration, price (or as per sheet headers).
-            Empty list if sheet not found or on error.
+        Tries worksheet "Services" first, then "Service". Returns list of dicts per row.
         """
         try:
             spreadsheet = self.client.open_by_key(self.sheets_id)
-            services_sheet = spreadsheet.worksheet("Services")
-        except gspread.exceptions.WorksheetNotFound:
-            logger.warning("Services worksheet not found")
-            return []
         except Exception as e:
-            logger.error(f"Error opening Services sheet: {e}")
+            logger.error(f"Error opening spreadsheet for services: {e}")
             return []
+        for sheet_name in ("Services", "Service"):
+            try:
+                services_sheet = spreadsheet.worksheet(sheet_name)
+                records = services_sheet.get_all_records()
+                if not records:
+                    continue
+                # Normalize keys (strip spaces) so "Service Name" and "Service  Name" both work
+                normalized = []
+                for row in records:
+                    normalized.append({str(k).strip(): v for k, v in row.items()})
+                return normalized
+            except gspread.exceptions.WorksheetNotFound:
+                continue
+            except Exception as e:
+                logger.error(f"Error reading sheet '{sheet_name}': {e}")
+                continue
+        logger.warning("No Services or Service worksheet found with data")
+        return []
+
+    def get_service_by_name_or_id(self, user_input: str) -> Optional[Dict]:
+        """Find a service matching the user's input (name or ID).
         
-        try:
-            records = services_sheet.get_all_records()
-            if not records:
-                return []
-            return list(records)
-        except Exception as e:
-            logger.error(f"Error reading Services sheet: {e}")
-            logger.error(f"Traceback: {traceback.format_exc()}")
-            return []
+        Args:
+            user_input: Service name or ID as provided by the user (case-insensitive)
+            
+        Returns:
+            Service record dict with normalized keys, or None if no match
+        """
+        services = self.get_services()
+        if not services:
+            return None
+        user_input_clean = (user_input or "").strip().lower()
+        if not user_input_clean:
+            return None
+        name_keys = ("title", "service name", "name", "service_name", "service")
+        for record in services:
+            if not isinstance(record, dict):
+                continue
+            keys_lower = {str(k).strip().lower(): k for k in record.keys()}
+            for key_lower, key_orig in keys_lower.items():
+                value = record.get(key_orig)
+                if value is None:
+                    continue
+                val_str = str(value).strip()
+                if not val_str:
+                    continue
+                if val_str.lower() == user_input_clean:
+                    return record
+            for key_lower, key_orig in keys_lower.items():
+                if key_lower in name_keys:
+                    value = record.get(key_orig)
+                    if value is None:
+                        continue
+                    val_str = str(value).strip().lower()
+                    if user_input_clean in val_str or val_str in user_input_clean:
+                        return record
+        return None
+
+    def get_service_id_from_record(self, record: Dict, index: int = 0) -> str:
+        """Extract service ID from a service record. Falls back to SVC + index if no ID column."""
+        if not record:
+            return f"SVC{str(index + 1).zfill(3)}"
+        keys_lower = {str(k).strip().lower(): k for k in record.keys()}
+        for id_key in ("service_id", "service id", "id"):
+            if id_key in keys_lower:
+                val = record.get(keys_lower[id_key])
+                if val is not None and str(val).strip():
+                    return str(val).strip()
+        return f"SVC{str(index + 1).zfill(3)}"
     
     def _get_service_account_email(self) -> Optional[str]:
         """Get the service account email from credentials.
