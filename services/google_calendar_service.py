@@ -4,16 +4,19 @@ import logging
 import os
 from datetime import datetime, timedelta, timezone
 from typing import List, Optional, Tuple
+from zoneinfo import ZoneInfo
+
 from google.oauth2.service_account import Credentials
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 
 logger = logging.getLogger(__name__)
 
-# Default slot duration in minutes; business hours 9–17
+# Booking hours: Mon-Sat 9:00-18:00, timezone Asia/Karachi
 DEFAULT_SLOT_MINUTES = 60
 DEFAULT_START_HOUR = 9
-DEFAULT_END_HOUR = 17
+DEFAULT_END_HOUR = 18
+DEFAULT_TIMEZONE = "Asia/Karachi"
 
 
 class GoogleCalendarService:
@@ -62,36 +65,51 @@ class GoogleCalendarService:
         slot_minutes: int = DEFAULT_SLOT_MINUTES,
         start_hour: int = DEFAULT_START_HOUR,
         end_hour: int = DEFAULT_END_HOUR,
+        tz_name: str = DEFAULT_TIMEZONE,
     ) -> List[Tuple[datetime, datetime]]:
         """Return list of (start, end) datetime slots that are free.
 
-        Slots are within business hours (start_hour–end_hour) in UTC, slot_minutes long.
+        Slots are Mon-Sat, start_hour–end_hour in the given timezone (default Asia/Karachi).
+        Returns datetimes in UTC for calendar API compatibility.
         """
         if not self._service or not self.calendar_id:
             return []
 
+        tz = ZoneInfo(tz_name)
         utc = timezone.utc
-        now = (from_date or datetime.now(utc))
-        if now.tzinfo is None:
-            now = now.replace(tzinfo=utc)
+        now_utc = from_date or datetime.now(utc)
+        if now_utc.tzinfo is None:
+            now_utc = now_utc.replace(tzinfo=utc)
+        now_local = now_utc.astimezone(tz)
         if to_date:
-            end_limit = to_date
+            end_limit_utc = to_date if to_date.tzinfo else to_date.replace(tzinfo=utc)
         else:
-            end_limit = now + timedelta(days=days_ahead)
-        if end_limit.tzinfo is None:
-            end_limit = end_limit.replace(tzinfo=utc)
+            end_limit_utc = now_utc + timedelta(days=days_ahead)
+        end_limit_local = end_limit_utc.astimezone(tz)
 
-        time_min = now.replace(hour=start_hour, minute=0, second=0, microsecond=0)
-        if time_min < now or time_min.hour >= end_hour:
-            time_min = (now + timedelta(days=1)).replace(
-                hour=start_hour, minute=0, second=0, microsecond=0
-            )
-        time_max = end_limit.replace(hour=end_hour, minute=0, second=0, microsecond=0)
+        def next_business_day(dt: datetime) -> datetime:
+            """Next Mon-Sat at start_hour in local time."""
+            while dt.weekday() == 6:
+                dt = dt + timedelta(days=1)
+            return dt.replace(hour=start_hour, minute=0, second=0, microsecond=0)
+
+        current_local = now_local.replace(hour=start_hour, minute=0, second=0, microsecond=0)
+        if current_local < now_local or current_local.hour >= end_hour:
+            current_local = next_business_day(now_local + timedelta(days=1))
+        if current_local.weekday() == 6:
+            current_local = next_business_day(current_local + timedelta(days=1))
 
         try:
+            time_min_utc = current_local.astimezone(utc)
+            time_max_local = end_limit_local.replace(hour=end_hour, minute=0, second=0, microsecond=0)
+            if time_max_local < current_local:
+                time_max_local = (current_local + timedelta(days=days_ahead)).replace(
+                    hour=end_hour, minute=0, second=0, microsecond=0
+                )
+            time_max_utc = time_max_local.astimezone(utc)
             body = {
-                "timeMin": time_min.isoformat().replace("+00:00", "Z"),
-                "timeMax": time_max.isoformat().replace("+00:00", "Z"),
+                "timeMin": time_min_utc.isoformat().replace("+00:00", "Z"),
+                "timeMax": time_max_utc.isoformat().replace("+00:00", "Z"),
                 "items": [{"id": self.calendar_id}],
             }
             result = self._service.freebusy().query(body=body).execute()
@@ -107,25 +125,33 @@ class GoogleCalendarService:
         busy_ranges = [(parse_iso(b["start"]), parse_iso(b["end"])) for b in busy_list]
         delta = timedelta(minutes=slot_minutes)
         slots = []
-        current = time_min
-        while current + delta <= time_max and len(slots) < 20:
-            slot_end = current + delta
-            if current.hour >= end_hour:
-                current = (current + timedelta(days=1)).replace(
-                    hour=start_hour, minute=0, second=0, microsecond=0
-                )
+        max_slots = 20
+        iterations = 0
+        max_iterations = 500
+        while len(slots) < max_slots and iterations < max_iterations:
+            iterations += 1
+            if current_local.weekday() == 6:
+                current_local = next_business_day(current_local + timedelta(days=1))
                 continue
-            overlaps = any(
-                current < b_end and slot_end > b_start
-                for b_start, b_end in busy_ranges
-            )
-            if not overlaps and current >= now:
-                slots.append((current, slot_end))
-            current = slot_end
-            if current.hour >= end_hour or current.hour < start_hour:
-                current = (current + timedelta(days=1)).replace(
-                    hour=start_hour, minute=0, second=0, microsecond=0
+            if current_local.hour >= end_hour:
+                current_local = next_business_day(current_local + timedelta(days=1))
+                continue
+            if current_local > end_limit_local:
+                break
+            slot_end_local = current_local + delta
+            if slot_end_local.hour > end_hour or (slot_end_local.hour == end_hour and slot_end_local.minute > 0):
+                current_local = next_business_day(current_local + timedelta(days=1))
+                continue
+            current_utc = current_local.astimezone(utc)
+            slot_end_utc = slot_end_local.astimezone(utc)
+            if current_utc >= now_utc:
+                overlaps = any(
+                    current_utc < b_end and slot_end_utc > b_start
+                    for b_start, b_end in busy_ranges
                 )
+                if not overlaps:
+                    slots.append((current_utc, slot_end_utc))
+            current_local = slot_end_local
 
         return slots
 

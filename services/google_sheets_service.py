@@ -395,6 +395,47 @@ class GoogleSheetsService:
         logger.warning("No Services or Service worksheet found with data")
         return []
 
+    def get_brand_config(self) -> Dict[str, str]:
+        """Read brand info (hours, location, contact) from BrandConfig sheet.
+        
+        Supports:
+        - Key-value format: columns "key" and "value"
+        - Single-row format: columns like hours, location, contact, phone, address, email
+        
+        Returns:
+            Dict mapping config keys (lowercase) to values. Empty dict if sheet missing.
+        """
+        try:
+            spreadsheet = self.client.open_by_key(self.sheets_id)
+            config_sheet = spreadsheet.worksheet("BrandConfig")
+        except gspread.exceptions.WorksheetNotFound:
+            logger.warning("BrandConfig worksheet not found")
+            return {}
+        except Exception as e:
+            logger.error(f"Error reading BrandConfig sheet: {e}")
+            return {}
+        try:
+            records = config_sheet.get_all_records()
+            if not records:
+                return {}
+            result = {}
+            keys_lower = {str(k).strip().lower(): k for k in records[0].keys()}
+            if "key" in keys_lower and "value" in keys_lower:
+                for row in records:
+                    key = row.get(keys_lower["key"])
+                    value = row.get(keys_lower["value"])
+                    if key is not None and str(key).strip():
+                        result[str(key).strip().lower()] = str(value or "").strip()
+            else:
+                for row in records:
+                    for key_orig, value in row.items():
+                        if key_orig and str(key_orig).strip() and value is not None:
+                            result[str(key_orig).strip().lower()] = str(value).strip()
+            return result
+        except Exception as e:
+            logger.error(f"Error parsing BrandConfig: {e}")
+            return {}
+
     def get_service_by_name_or_id(self, user_input: str) -> Optional[Dict]:
         """Find a service matching the user's input (name or ID).
         

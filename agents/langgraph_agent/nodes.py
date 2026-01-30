@@ -4,6 +4,7 @@ import logging
 import re
 import traceback
 from typing import Any, Dict, List, Optional
+from zoneinfo import ZoneInfo
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_core.messages import HumanMessage, AIMessage
 from agents.langgraph_agent.state import AgentState
@@ -312,6 +313,7 @@ Your role is to:
    c) Only when the customer says yes they want to book, offer the AVAILABLE TIME SLOTS and ask which slot they prefer.
    d) Once they choose a slot, confirm: "I've booked you for [date/time]. See you then!"
 5. If the customer asks for or requests a service that is NOT in our list: Apologize and say "I'm sorry, we don't offer that service. We only have these services: [list them]. You can book from these only."
+6. When the customer asks generic/info questions (hours, location, address, contact, phone, email), answer using the BRAND INFO section below. Never make up this information.
 
 IMPORTANT: You must collect the following information to qualify a lead:
 - Customer's full name
@@ -327,6 +329,10 @@ CRITICAL: Never use placeholder text, brackets, or any template variables like [
 
 Be conversational, helpful, and professional. Ask one question at a time to avoid overwhelming the customer.
 Keep responses concise and friendly. After collecting pet details, list services and ask which service they want. Do NOT ask "would you like to hear about services or book" - go straight to listing services."""
+
+        brand_text = self._format_brand_config_for_prompt()
+        if brand_text:
+            base += "\n\nBRAND INFO (use this to answer questions about hours, location, contact):\n\n" + brand_text
 
         services_text = self._format_services_for_prompt()
         if services_text:
@@ -360,6 +366,36 @@ Keep responses concise and friendly. After collecting pet details, list services
             base += "\n\nThe customer has selected a service but not yet said they want to book. Ask 'Would you like to book an appointment?' Do NOT show time slots until they say yes."
 
         return base
+
+    def _format_brand_config_for_prompt(self) -> str:
+        """Fetch brand config (hours, location, contact) from BrandConfig sheet for the prompt."""
+        config = self.sheets_service.get_brand_config()
+        if not config:
+            return ""
+        lines = []
+        key_labels = {
+            "brand_name": "Business Name",
+            "welcome_copy": "Welcome Message",
+            "hours": "Hours",
+            "business_hours": "Hours",
+            "opening_hours": "Hours",
+            "location": "Location",
+            "address": "Address",
+            "timezone": "Timezone",
+            "contact": "Contact",
+            "phone": "Phone",
+            "phone_number": "Phone",
+            "email": "Email",
+        }
+        skip_keys = ("brand_id", "upsells_json", "objection_snippets_json")
+        for key, value in config.items():
+            if key in skip_keys or not value:
+                continue
+            label = key_labels.get(key, key.replace("_", " ").title())
+            val_str = str(value).strip()
+            if val_str:
+                lines.append(f"- {label}: {val_str}")
+        return "\n".join(lines) if lines else ""
 
     def _format_services_for_prompt(self) -> str:
         """Fetch services from the Services sheet and include all columns in the prompt."""
@@ -492,15 +528,23 @@ Return only the service name or NONE, nothing else."""
         return False
 
     def _format_available_slots_for_prompt(self) -> str:
-        """Fetch available slots from Calendar and format for the system prompt."""
+        """Fetch available slots from Calendar and format for the system prompt.
+        Displays times in Asia/Karachi (booking hours Mon-Sat 9:00-18:00).
+        """
         if not self.calendar_service:
             return ""
         slots = self.calendar_service.list_available_slots()
         if not slots:
             return "No slots available in the next 7 days."
+        tz = ZoneInfo("Asia/Karachi")
         lines = []
-        for start, end in slots:
-            lines.append(f"- {start.strftime('%A %Y-%m-%d %H:%M')} to {end.strftime('%H:%M')} UTC")
+        for start_utc, end_utc in slots:
+            start_local = start_utc.astimezone(tz)
+            end_local = end_utc.astimezone(tz)
+            lines.append(
+                f"- {start_local.strftime('%A %Y-%m-%d %H:%M')} to "
+                f"{end_local.strftime('%H:%M')} (Asia/Karachi)"
+            )
         return "\n".join(lines)
 
     def book_appointment_node(self, state: AgentState) -> Dict:
@@ -575,7 +619,8 @@ Return only the service name or NONE, nothing else."""
             calendar_event_id=event_id or "",
         )
         self.sheets_service.update_lead_status(user_id, "booked")
-        confirmation = f"I've booked your appointment for {start_dt.strftime('%A, %B %d at %H:%M')} UTC. See you then!"
+        start_local = start_dt.astimezone(ZoneInfo("Asia/Karachi"))
+        confirmation = f"I've booked your appointment for {start_local.strftime('%A, %B %d at %H:%M')} (Asia/Karachi). See you then!"
         new_messages = list(messages)
         if new_messages and new_messages[-1].get("role") == "assistant":
             new_messages[-1] = {"role": "assistant", "content": confirmation}
@@ -590,8 +635,10 @@ Return only the service name or NONE, nothing else."""
         """Use LLM to extract which slot the user chose from their message. Returns (start_dt, end_dt) or None."""
         if not message or not slots:
             return None
+        tz = ZoneInfo("Asia/Karachi")
         slots_desc = "\n".join(
-            f"{i+1}. {start.strftime('%A %Y-%m-%d %H:%M')} to {end.strftime('%H:%M')} UTC"
+            f"{i+1}. {start.astimezone(tz).strftime('%A %Y-%m-%d %H:%M')} to "
+            f"{end.astimezone(tz).strftime('%H:%M')} (Asia/Karachi)"
             for i, (start, end) in enumerate(slots)
         )
         prompt = f"""The user chose an appointment time. Their message: "{message}"
