@@ -18,4 +18,6 @@ class AgentState(TypedDict):
     appointment_details: Optional[dict]
     appointment_booked: bool
     available_slots: Optional[List]
+    last_interaction_at: Optional[float]
+    reminder_sent: bool
 

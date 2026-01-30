@@ -1,5 +1,6 @@
 """LangGraph agent implementation wrapper."""
 import logging
+import time
 from typing import Dict, Any
 from agents.base import BaseAgent
 from agents.langgraph_agent.graph import create_agent_graph
@@ -66,6 +67,8 @@ class LangGraphAgent(BaseAgent):
                 "appointment_details": prev.get("appointment_details"),
                 "appointment_booked": prev.get("appointment_booked", False),
                 "available_slots": prev.get("available_slots"),
+                "last_interaction_at": time.time(),
+                "reminder_sent": prev.get("reminder_sent", False),
             }
             
             # Run the agent graph
