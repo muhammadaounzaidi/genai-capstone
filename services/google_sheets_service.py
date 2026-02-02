@@ -25,6 +25,19 @@ APPOINTMENTS_HEADERS = [
     "appt_id", "lead_id", "service_id", "status",
     "start_iso", "end_iso", "calendar_event_id",
 ]
+# Services sheet headers: service_id, title (display name), description, base_price, duration_min, etc.
+SERVICES_HEADERS = [
+    "service_id",
+    "title",
+    "description",
+    "base_price",
+    "duration_min",
+    "breed_modifier_json",
+    "weight_brackets_json",
+    "upsells_json",
+]
+SERVICE_ID_KEY = SERVICES_HEADERS[0]
+SERVICE_TITLE_KEY = SERVICES_HEADERS[1]
 
 
 class GoogleSheetsService:
@@ -83,10 +96,11 @@ class GoogleSheetsService:
             return sheet
 
     def _ensure_leads_and_pets_sheets(self, spreadsheet) -> None:
-        """Create Leads, Pets, and Appointments sheets with headers if they do not exist."""
+        """Create Leads, Pets, Appointments, and Services sheets with headers if they do not exist."""
         self._get_or_create_sheet(spreadsheet, "Leads", LEADS_HEADERS)
         self._get_or_create_sheet(spreadsheet, "Pets", PETS_HEADERS)
         self._get_or_create_sheet(spreadsheet, "Appointments", APPOINTMENTS_HEADERS)
+        self._get_or_create_sheet(spreadsheet, "Services", SERVICES_HEADERS)
     
     def create_lead(self, user_id: str, username: str, message: str) -> Dict:
         """Create a new lead record in the Leads sheet.
@@ -382,7 +396,59 @@ class GoogleSheetsService:
         appointments_sheet.append_row(row)
         logger.info(f"Created appointment {appt_id} for lead {lead_id}")
         return appt_id
-    
+
+    def get_appointment_by_lead_id(self, lead_id: str) -> Optional[Dict]:
+        """Find the most recent appointment for a lead. Returns row as dict or None."""
+        try:
+            spreadsheet = self.client.open_by_key(self.sheets_id)
+        except Exception as e:
+            logger.error(f"Error opening spreadsheet for appointment lookup: {e}")
+            return None
+        try:
+            appointments_sheet = self._get_or_create_sheet(
+                spreadsheet, "Appointments", APPOINTMENTS_HEADERS
+            )
+            headers = appointments_sheet.row_values(1)
+            cells = appointments_sheet.findall(str(lead_id))
+            if not cells:
+                return None
+            row_num = max(cell.row for cell in cells)
+            row_vals = appointments_sheet.row_values(row_num)
+            padded = row_vals + [""] * (len(headers) - len(row_vals))
+            return dict(zip(headers, padded))
+        except Exception as e:
+            logger.error(f"Error getting appointment for lead {lead_id}: {e}")
+            return None
+
+    def update_appointment_service(self, lead_id: str, service_id: str) -> bool:
+        """Update the service_id for the most recent appointment of a lead. Returns True if updated."""
+        try:
+            spreadsheet = self.client.open_by_key(self.sheets_id)
+        except Exception as e:
+            logger.error(f"Error opening spreadsheet for appointment update: {e}")
+            return False
+        try:
+            appointments_sheet = self._get_or_create_sheet(
+                spreadsheet, "Appointments", APPOINTMENTS_HEADERS
+            )
+            headers = appointments_sheet.row_values(1)
+            header_to_col = {str(h).strip(): idx + 1 for idx, h in enumerate(headers)}
+            service_col = header_to_col.get("service_id") or header_to_col.get("service id")
+            if not service_col:
+                logger.warning("Appointments sheet has no service_id column")
+                return False
+            cells = appointments_sheet.findall(str(lead_id))
+            if not cells:
+                logger.warning(f"No appointment found for lead {lead_id}")
+                return False
+            row_num = max(cell.row for cell in cells)
+            appointments_sheet.update_cell(row_num, service_col, service_id)
+            logger.info(f"Updated appointment for lead {lead_id} to service {service_id}")
+            return True
+        except Exception as e:
+            logger.error(f"Error updating appointment service for lead {lead_id}: {e}")
+            return False
+
     def _extract_api_error_message(self, error: gspread.exceptions.APIError) -> str:
         """Extract detailed error message from APIError.
         
@@ -415,9 +481,10 @@ class GoogleSheetsService:
         return error_str if error_str else f"APIError: {type(error).__name__}"
     
     def get_services(self) -> list:
-        """Read services from the Services sheet (name, duration, price).
+        """Read services from the Services sheet using SERVICES_HEADERS schema.
         
         Tries worksheet "Services" first, then "Service". Returns list of dicts per row.
+        Columns: service_id, title, description, base_price, duration_min, etc.
         """
         try:
             spreadsheet = self.client.open_by_key(self.sheets_id)
@@ -430,7 +497,6 @@ class GoogleSheetsService:
                 records = services_sheet.get_all_records()
                 if not records:
                     continue
-                # Normalize keys (strip spaces) so "Service Name" and "Service  Name" both work
                 normalized = []
                 for row in records:
                     normalized.append({str(k).strip(): v for k, v in row.items()})
@@ -487,6 +553,9 @@ class GoogleSheetsService:
     def get_service_by_name_or_id(self, user_input: str) -> Optional[Dict]:
         """Find a service matching the user's input (name or ID).
         
+        Uses SERVICE_TITLE_KEY (title) for display name and SERVICE_ID_KEY (service_id) for ID
+        from SERVICES_HEADERS. Also matches on alternate column names for compatibility.
+        
         Args:
             user_input: Service name or ID as provided by the user (case-insensitive)
             
@@ -499,7 +568,7 @@ class GoogleSheetsService:
         user_input_clean = (user_input or "").strip().lower()
         if not user_input_clean:
             return None
-        name_keys = ("title", "service name", "name", "service_name", "service")
+        name_keys = (SERVICE_TITLE_KEY, "service name", "name", "service_name", "service")
         for record in services:
             if not isinstance(record, dict):
                 continue
@@ -524,11 +593,11 @@ class GoogleSheetsService:
         return None
 
     def get_service_id_from_record(self, record: Dict, index: int = 0) -> str:
-        """Extract service ID from a service record. Falls back to SVC + index if no ID column."""
+        """Extract service ID from a service record using SERVICE_ID_KEY from SERVICES_HEADERS."""
         if not record:
             return f"SVC{str(index + 1).zfill(3)}"
         keys_lower = {str(k).strip().lower(): k for k in record.keys()}
-        for id_key in ("service_id", "service id", "id"):
+        for id_key in (SERVICE_ID_KEY, "service id", "id"):
             if id_key in keys_lower:
                 val = record.get(keys_lower[id_key])
                 if val is not None and str(val).strip():

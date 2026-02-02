@@ -9,7 +9,12 @@ from zoneinfo import ZoneInfo
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_core.messages import HumanMessage, AIMessage
 from agents.langgraph_agent.state import AgentState
-from services.google_sheets_service import GoogleSheetsService
+from services.google_sheets_service import (
+    GoogleSheetsService,
+    SERVICE_ID_KEY,
+    SERVICE_TITLE_KEY,
+    SERVICES_HEADERS,
+)
 from config import Config
 
 logger = logging.getLogger(__name__)
@@ -335,6 +340,7 @@ Your role is to:
    d) Only after the customer has chosen a specific slot (by number or date/time), confirm: "I've booked you for [date/time]. See you then!"
 5. If the customer asks for or requests a service that is NOT in our list: Apologize and say "I'm sorry, we don't offer that service. We only have these services: [list them]. You can book from these only."
 6. When the customer asks generic/info questions (hours, location, address, contact, phone, email), answer using the BRAND INFO section below. Never make up this information.
+7. UPDATE BOOKING: If the customer already has a booking and asks to change or update it (e.g. change the service), list the AVAILABLE SERVICES and ask which service they want. After they choose a new service, confirm that the booking has been updated to that service.
 
 IMPORTANT: You must collect the following information to qualify a lead:
 - Customer's full name
@@ -426,7 +432,45 @@ Keep responses concise and friendly. After collecting pet details, list services
             else:
                 base += "\n\nThe customer has selected a service. Ask 'Would you like to book an appointment?' (No slots available to show yet.)"
 
+        # When the customer already has a booking, they can ask to change the service.
+        if (
+            state
+            and state.get("lead_qualified")
+            and state.get("appointment_booked")
+            and state.get("service_selected")
+        ):
+            current_service_name = self._get_service_name_by_id(state.get("service_selected"))
+            base += (
+                "\n\nThe customer has an existing booking. Current service: "
+                + (current_service_name or state.get("service_selected", ""))
+                + ". "
+                "If they ask to change or update their booking (e.g. change the service), list the AVAILABLE SERVICES above and ask which service they want. "
+                "After they choose a new service, confirm that the booking has been updated to that service."
+            )
+
         return base
+
+    def _get_service_name_by_id(self, service_id: Optional[str]) -> Optional[str]:
+        """Return the display name for a service_id from the Services sheet (SERVICE_TITLE_KEY)."""
+        if not service_id:
+            return None
+        services = self.sheets_service.get_services()
+        if not services:
+            return None
+        name_keys = (SERVICE_TITLE_KEY, "Service Name", "name", "Name", "service_name", "Service")
+        for index, record in enumerate(services):
+            if not isinstance(record, dict):
+                continue
+            sid = self.sheets_service.get_service_id_from_record(record, index)
+            if str(sid).strip() == str(service_id).strip():
+                keys_lower = {str(k).strip().lower(): k for k in record.keys()}
+                for key_lower in name_keys:
+                    if key_lower in keys_lower:
+                        val = record.get(keys_lower[key_lower])
+                        if val is not None and str(val).strip():
+                            return str(val).strip()
+                return None
+        return None
 
     def _format_brand_config_for_prompt(self) -> str:
         """Fetch brand config (hours, location, contact) from BrandConfig sheet for the prompt."""
@@ -459,7 +503,7 @@ Keep responses concise and friendly. After collecting pet details, list services
         return "\n".join(lines) if lines else ""
 
     def _format_services_for_prompt(self) -> str:
-        """Fetch services from the Services sheet and include all columns in the prompt."""
+        """Fetch services from the Services sheet and include columns per SERVICES_HEADERS."""
         services = self.sheets_service.get_services()
         if not services:
             return ""
@@ -467,18 +511,16 @@ Keep responses concise and friendly. After collecting pet details, list services
         for idx, record in enumerate(services, start=1):
             if not isinstance(record, dict):
                 continue
-            # Include every non-empty column so the agent can show all information
             parts = [f"Service {idx}:"]
-            for key, value in record.items():
-                key_str = str(key).strip()
-                if not key_str:
+            for key in SERVICES_HEADERS:
+                if key not in record:
                     continue
-                val = value
+                val = record.get(key)
                 if val is None:
                     val = ""
                 val_str = str(val).strip()
                 if val_str:
-                    parts.append(f"  {key_str}: {val_str}")
+                    parts.append(f"  {key}: {val_str}")
             if len(parts) > 1:
                 blocks.append("\n".join(parts))
         return "\n\n".join(blocks) if blocks else ""
@@ -508,14 +550,19 @@ Keep responses concise and friendly. After collecting pet details, list services
             return {}
         service_names = []
         for record in services:
-            if isinstance(record, dict):
-                for key in ("title", "Service Name", "name", "Name", "service_name", "Service"):
-                    key_lower = {str(k).strip().lower(): k for k in record.keys()}
-                    if key.lower() in key_lower:
-                        val = record.get(key_lower[key.lower()])
-                        if val and str(val).strip():
-                            service_names.append(str(val).strip())
-                            break
+            if not isinstance(record, dict):
+                continue
+            val = record.get(SERVICE_TITLE_KEY)
+            if val and str(val).strip():
+                service_names.append(str(val).strip())
+                continue
+            for key in ("Service Name", "name", "Name", "service_name", "Service"):
+                key_lower = {str(k).strip().lower(): k for k in record.keys()}
+                if key.lower() in key_lower:
+                    val = record.get(key_lower[key.lower()])
+                    if val and str(val).strip():
+                        service_names.append(str(val).strip())
+                        break
         if not service_names:
             return {}
         extraction_prompt = f"""From this user message, extract ONLY the service name they are requesting, if any.
@@ -539,7 +586,7 @@ Return only the service name or NONE, nothing else."""
             )
             if service_record:
                 services_list = self.sheets_service.get_services()
-                name_keys = ("title", "service name", "name", "service_name", "service")
+                name_keys = (SERVICE_TITLE_KEY, "service name", "name", "service_name", "service")
                 record_name = None
                 for key_lower, key_orig in {
                     str(k).strip().lower(): k for k in service_record.keys()
@@ -601,14 +648,15 @@ Return only the service name or NONE, nothing else."""
         return "\n".join(lines)
 
     def sync_to_sheets_node(self, state: AgentState) -> Dict:
-        """Run qualify_lead, select_service, and book_appointment in sequence so any user
-        update (name, phone, pet, service, slot) is reflected in sheets at any point.
+        """Run qualify_lead, select_service, book_appointment, and update_booking in sequence
+        so any user update (name, phone, pet, service, slot, or change of service) is reflected.
         """
         merged: Dict = {}
         for node_fn in (
             self.qualify_lead_node,
             self.select_service_node,
             self.book_appointment_node,
+            self.update_booking_node,
         ):
             try:
                 result = node_fn(state)
@@ -706,6 +754,165 @@ Return only the service name or NONE, nothing else."""
             "messages": new_messages,
             "appointment_booked": True,
         }
+
+    def update_booking_node(self, state: AgentState) -> Dict:
+        """When the user has a booking and asks to change the service, extract new service
+        and update the appointment in Sheets (service_id). Updates state and confirms to user.
+        """
+        if not state.get("lead_qualified") or not state.get("appointment_booked"):
+            return {}
+        if not state.get("service_selected"):
+            return {}
+        messages = state.get("messages", [])
+        if not messages:
+            return {}
+        last_user_content = ""
+        for msg in reversed(messages):
+            if msg.get("role") == "user":
+                last_user_content = (msg.get("content") or "").strip()
+                break
+        if not last_user_content:
+            return {}
+        # Detect if user wants to change/update their booking or is selecting a new service.
+        try:
+            intent_prompt = (
+                "The user already has a booking. Does the user want to change/update their booking "
+                "(e.g. said 'change service', 'update my booking') OR are they selecting a new "
+                "service for their booking (e.g. naming a service like 'Basic Groom', 'the first one')? "
+                "Reply ONLY 'YES' if they want to change the booking or are choosing a new service. "
+                "Reply ONLY 'NO' if they are just chatting or not referring to changing the booking.\n\n"
+                f'User message: "{last_user_content}"'
+            )
+            intent_response = self.llm.invoke([HumanMessage(content=intent_prompt)])
+            intent_text = (intent_response.content or "").strip().upper()
+            if "YES" not in intent_text:
+                return {}
+        except Exception as e:
+            logger.error(f"Error detecting update-booking intent: {e}")
+            return {}
+        # Extract which new service they want (same logic as select_service_node).
+        new_service_id = self._extract_new_service_from_message(last_user_content, state)
+        if not new_service_id or new_service_id == state.get("service_selected"):
+            return {}
+        user_id = state.get("user_id")
+        lead_id = self._get_lead_id_for_user(user_id)
+        if not lead_id:
+            return {}
+        success = self.sheets_service.update_appointment_service(lead_id, new_service_id)
+        if not success:
+            return {}
+        new_service_name = self._get_service_name_by_id(new_service_id) or new_service_id
+        confirmation = (
+            f"I've updated your booking to {new_service_name}. "
+            "Your appointment time stays the same. See you then!"
+        )
+        new_messages = list(messages)
+        if new_messages and new_messages[-1].get("role") == "assistant":
+            new_messages[-1] = {"role": "assistant", "content": confirmation}
+        else:
+            new_messages.append({"role": "assistant", "content": confirmation})
+        return {
+            "messages": new_messages,
+            "service_selected": new_service_id,
+        }
+
+    def _get_lead_id_for_user(self, user_id: str) -> Optional[str]:
+        """Return the lead_id for the most recent lead row matching user_id."""
+        try:
+            spreadsheet = self.sheets_service.client.open_by_key(self.sheets_service.sheets_id)
+            leads_sheet = spreadsheet.worksheet("Leads")
+            headers = leads_sheet.row_values(1)
+            cells = leads_sheet.findall(str(user_id))
+            if not cells:
+                discord_col = None
+                for idx, header in enumerate(headers):
+                    if header and str(header).strip().lower() == "discord_user_id":
+                        discord_col = idx + 1
+                        break
+                if not discord_col:
+                    return None
+                from gspread.cell import Cell
+                all_vals = leads_sheet.col_values(discord_col)
+                cells = [
+                    Cell(row_num, discord_col, str(user_id))
+                    for row_num, val in enumerate(all_vals, start=1)
+                    if row_num > 1 and str(val).strip() == str(user_id).strip()
+                ]
+            if not cells:
+                return None
+            row_num = max(cell.row for cell in cells)
+            row_vals = leads_sheet.row_values(row_num)
+            padded = row_vals + [""] * (len(headers) - len(row_vals))
+            lead_row = dict(zip(headers, padded))
+            return lead_row.get("lead_id")
+        except Exception as e:
+            logger.error(f"Error getting lead_id for user {user_id}: {e}")
+            return None
+
+    def _extract_new_service_from_message(self, message: str, state: AgentState) -> Optional[str]:
+        """Extract a new service selection from the user message (for update-booking flow).
+        Returns service_id or None.
+        """
+        services = self.sheets_service.get_services()
+        if not services:
+            return None
+        service_names = []
+        for record in services:
+            if not isinstance(record, dict):
+                continue
+            val = record.get(SERVICE_TITLE_KEY)
+            if val and str(val).strip():
+                service_names.append(str(val).strip())
+                continue
+            keys_lower = {str(k).strip().lower(): k for k in record.keys()}
+            for key in ("Service Name", "name", "Name", "service_name", "Service"):
+                if key.lower() in keys_lower:
+                    val = record.get(keys_lower[key.lower()])
+                    if val and str(val).strip():
+                        service_names.append(str(val).strip())
+                        break
+        if not service_names:
+            return None
+        extraction_prompt = (
+            f"From this user message, extract ONLY the service name they are requesting, if any.\n\n"
+            f"Available services: {', '.join(service_names)}\n\n"
+            f'User message: "{message}"\n\n'
+            "If the user is selecting or asking for one of the listed services (or a close match), "
+            "return that service name exactly as listed. "
+            "If they are NOT selecting a service, return: NONE\n\n"
+            "Return only the service name or NONE, nothing else."
+        )
+        try:
+            response = self.llm.invoke([HumanMessage(content=extraction_prompt)])
+            extracted = (response.content or "").strip().upper()
+            if not extracted or extracted == "NONE":
+                return None
+            service_record = self.sheets_service.get_service_by_name_or_id(
+                response.content.strip() if response.content else ""
+            )
+            if not service_record:
+                return None
+            services_list = self.sheets_service.get_services()
+            name_keys = (SERVICE_TITLE_KEY, "service name", "name", "service_name", "service")
+            record_name = None
+            for key_lower, key_orig in {
+                str(k).strip().lower(): k for k in service_record.keys()
+            }.items():
+                if key_lower in name_keys:
+                    record_name = str(service_record.get(key_orig, "")).strip()
+                    break
+            idx = 0
+            for i, rec in enumerate(services_list):
+                if not isinstance(rec, dict):
+                    continue
+                for k_l, k_o in {str(k).strip().lower(): k for k in rec.keys()}.items():
+                    if k_l in name_keys and str(rec.get(k_o, "")).strip() == record_name:
+                        idx = i
+                        break
+            return self.sheets_service.get_service_id_from_record(service_record, idx)
+        except Exception as e:
+            logger.error(f"Error extracting new service from message: {e}")
+            return None
 
     def _extract_chosen_slot_from_message(self, message: str, slots: List) -> Optional[tuple]:
         """Use LLM to extract which slot the user chose from their message. Returns (start_dt, end_dt) or None."""
