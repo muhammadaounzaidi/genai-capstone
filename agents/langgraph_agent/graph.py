@@ -20,17 +20,13 @@ def create_agent_graph(sheets_service: GoogleSheetsService, calendar_service=Non
     workflow = StateGraph(AgentState)
     
     workflow.add_node("create_lead", nodes.create_lead_node)
-    workflow.add_node("select_service", nodes.select_service_node)
     workflow.add_node("process_message", nodes.process_message_node)
-    workflow.add_node("qualify_lead", nodes.qualify_lead_node)
-    workflow.add_node("book_appointment", nodes.book_appointment_node)
+    workflow.add_node("sync_to_sheets", nodes.sync_to_sheets_node)
     
     workflow.set_entry_point("create_lead")
-    workflow.add_edge("create_lead", "select_service")
-    workflow.add_edge("select_service", "process_message")
-    workflow.add_edge("process_message", "qualify_lead")
-    workflow.add_edge("qualify_lead", "book_appointment")
-    workflow.add_edge("book_appointment", END)
+    workflow.add_edge("create_lead", "process_message")
+    workflow.add_edge("process_message", "sync_to_sheets")
+    workflow.add_edge("sync_to_sheets", END)
     
     return workflow.compile()
 

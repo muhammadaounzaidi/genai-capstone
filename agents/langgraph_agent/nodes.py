@@ -3,6 +3,7 @@ import json
 import logging
 import re
 import traceback
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 from zoneinfo import ZoneInfo
 from langchain_google_genai import ChatGoogleGenerativeAI
@@ -129,10 +130,6 @@ class AgentNodes:
             logger.warning(f"Lead not created yet for user {state['user_id']}, skipping qualification")
             return {"lead_qualified": False}
 
-        if state.get("lead_qualified", False) and state.get("pet_added", False):
-            logger.info(f"Lead already qualified with pet for user {state['user_id']}")
-            return {"lead_qualified": True, "pet_added": True}
-        
         messages = state.get("messages", [])
         if not messages:
             logger.warning("No messages in state to qualify lead")
@@ -156,7 +153,7 @@ class AgentNodes:
                 )
                 
                 if success:
-                    logger.info(f"Successfully qualified lead for {state['username']}")
+                    logger.info(f"Successfully updated lead for {state['username']} (partial or full qualification)")
                     collected_info = state.get("collected_info", {})
                     collected_info.update(qualification_info)
                     has_pet_info = any([
@@ -167,9 +164,12 @@ class AgentNodes:
                         qualification_info.get("pet_coat"),
                         qualification_info.get("species"),
                     ])
+                    has_name_and_phone = bool(
+                        qualification_info.get("name") and qualification_info.get("phone")
+                    )
                     return {
-                        "lead_qualified": True,
-                        "current_step": "qualified",
+                        "lead_qualified": has_name_and_phone or state.get("lead_qualified", False),
+                        "current_step": "qualified" if has_name_and_phone else state.get("current_step", "conversation"),
                         "collected_info": collected_info,
                         "pet_added": has_pet_info or state.get("pet_added", False),
                     }
@@ -204,6 +204,7 @@ class AgentNodes:
 User Information:
 - name: The customer's name
 - phone: The customer's phone number (include full number as given, e.g. 00112233)
+- city: The customer's city (optional)
 
 Pet Information (you MUST include these in the JSON whenever the customer has mentioned them):
 - pet_name: The pet's name (e.g. Johnny, Max)
@@ -228,7 +229,7 @@ Use null for any missing information. Example format:
     "pet_coat": "long"
 }}
 
-If you cannot extract at least the user's name and phone, return the string "null" (not a JSON null value).
+Extract whatever information is present. If the customer has given their name, phone, city, or any pet details, return a JSON object with those fields (use null for missing). If the conversation contains no such information, return the string "null".
 Whenever the customer has mentioned their pet (breed, age, weight, coat, or name), include every one of those in the JSON; do not omit pet_breed, pet_weight, pet_age, or pet_coat if they appear in the conversation."""
         
         try:
@@ -247,18 +248,38 @@ Whenever the customer has mentioned their pet (breed, age, weight, coat, or name
             
             name = qualification_info.get("name")
             phone = qualification_info.get("phone")
-            
-            if not name or not phone:
+            city = qualification_info.get("city")
+            pet_name = qualification_info.get("pet_name")
+            pet_breed = qualification_info.get("pet_breed")
+            pet_weight = qualification_info.get("pet_weight")
+            pet_age = qualification_info.get("pet_age")
+            pet_coat = qualification_info.get("pet_coat")
+            species = qualification_info.get("species")
+
+            has_any = any([
+                name and str(name).strip(),
+                phone and str(phone).strip(),
+                city and str(city).strip(),
+                pet_name and str(pet_name).strip(),
+                pet_breed and str(pet_breed).strip(),
+                pet_weight and str(pet_weight).strip(),
+                pet_age and str(pet_age).strip(),
+                pet_coat and str(pet_coat).strip(),
+                species and str(species).strip(),
+            ])
+            if not has_any:
                 return None
-            
+
             return {
                 "name": name,
                 "phone": phone,
-                "pet_name": qualification_info.get("pet_name"),
-                "pet_breed": qualification_info.get("pet_breed"),
-                "pet_weight": qualification_info.get("pet_weight"),
-                "pet_age": qualification_info.get("pet_age"),
-                "pet_coat": qualification_info.get("pet_coat"),
+                "city": city,
+                "pet_name": pet_name,
+                "pet_breed": pet_breed,
+                "pet_weight": pet_weight,
+                "pet_age": pet_age,
+                "pet_coat": pet_coat,
+                "species": species,
             }
         except json.JSONDecodeError as e:
             logger.error(f"Failed to parse qualification info JSON: {e}")
@@ -310,8 +331,8 @@ Your role is to:
 4. BOOKING FLOW - follow this order strictly:
    a) Once you have collected all required info (name, phone, pet details), immediately LIST the AVAILABLE SERVICES and ask "Which service would you like?" Do NOT ask about booking an appointment at this point.
    b) Only after the customer has selected/confirmed a service, ask "Would you like to book an appointment?" Do NOT offer time slots yet.
-   c) Only when the customer says yes they want to book, offer the AVAILABLE TIME SLOTS and ask which slot they prefer.
-   d) Once they choose a slot, confirm: "I've booked you for [date/time]. See you then!"
+   c) Only when the customer says yes they want to book, you MUST list the AVAILABLE TIME SLOTS (from the slot list below) and say these slots are available and ask which slot they prefer. Do NOT book until the customer has chosen a specific slot (e.g. "slot 1", "Tuesday at 9 AM").
+   d) Only after the customer has chosen a specific slot (by number or date/time), confirm: "I've booked you for [date/time]. See you then!"
 5. If the customer asks for or requests a service that is NOT in our list: Apologize and say "I'm sorry, we don't offer that service. We only have these services: [list them]. You can book from these only."
 6. When the customer asks generic/info questions (hours, location, address, contact, phone, email), answer using the BRAND INFO section below. Never make up this information.
 
@@ -327,8 +348,41 @@ When greeting a new customer for the first time, use this exact greeting format:
 
 CRITICAL: Never use placeholder text, brackets, or any template variables like [Your Name/Assistant Name], [Name], or similar. Always use complete, natural sentences. If you need to refer to yourself, say "I'm an assistant" or "I'm here to help" - never use placeholders.
 
-Be conversational, helpful, and professional. Ask one question at a time to avoid overwhelming the customer.
+Be conversational, helpful, and professional. The customer may provide name, phone, pet details, or all of these in a single message. Always use the INFORMATION ALREADY COLLECTED section below: if we already have something (e.g. name and phone), acknowledge it and do NOT ask again; only ask for what is still missing (e.g. pet details) or move to listing services if everything is collected.
 Keep responses concise and friendly. After collecting pet details, list services and ask which service they want. Do NOT ask "would you like to hear about services or book" - go straight to listing services."""
+
+        collected_info = state.get("collected_info", {}) if state else {}
+        messages = state.get("messages", []) if state else []
+        if messages:
+            extracted = self._extract_qualification_info(messages)
+            if extracted:
+                merged = dict(collected_info)
+                merged.update(extracted)
+                collected_info = merged
+        if collected_info:
+            lines = ["INFORMATION ALREADY COLLECTED (do not ask again; acknowledge and only ask for what is missing):"]
+            if collected_info.get("name"):
+                lines.append(f"- Name: {collected_info.get('name')}")
+            if collected_info.get("phone"):
+                lines.append(f"- Phone: {collected_info.get('phone')}")
+            if collected_info.get("city"):
+                lines.append(f"- City: {collected_info.get('city')}")
+            pet_parts = []
+            if collected_info.get("pet_name"):
+                pet_parts.append(f"name: {collected_info['pet_name']}")
+            if collected_info.get("species"):
+                pet_parts.append(collected_info["species"])
+            if collected_info.get("pet_breed"):
+                pet_parts.append(f"breed: {collected_info['pet_breed']}")
+            if collected_info.get("pet_weight"):
+                pet_parts.append(f"weight: {collected_info['pet_weight']}")
+            if collected_info.get("pet_age"):
+                pet_parts.append(f"age: {collected_info['pet_age']}")
+            if collected_info.get("pet_coat"):
+                pet_parts.append(f"coat: {collected_info['pet_coat']}")
+            if pet_parts:
+                lines.append("- Pet: " + ", ".join(pet_parts))
+            base += "\n\n" + "\n".join(lines)
 
         brand_text = self._format_brand_config_for_prompt()
         if brand_text:
@@ -347,23 +401,30 @@ Keep responses concise and friendly. After collecting pet details, list services
         ):
             base += f"\n\nThe customer requested '{state.get('requested_service_name')}' which we do NOT offer. Apologize and say we only have the services listed above. They can book from those only."
 
+        # When service is selected and not yet booked, always provide slots so the LLM can list them
+        # when the customer says they want to book (flow decided by LLM from conversation).
         if (
             state
             and state.get("lead_qualified")
             and not state.get("appointment_booked")
             and state.get("service_selected")
-            and self._user_wants_to_book(state.get("messages", []))
         ):
             slots_text = self._format_available_slots_for_prompt()
             if slots_text:
-                base += "\n\nAVAILABLE TIME SLOTS (offer these now and ask which slot they prefer):\n" + slots_text
-        elif (
-            state
-            and state.get("lead_qualified")
-            and not state.get("appointment_booked")
-            and state.get("service_selected")
-        ):
-            base += "\n\nThe customer has selected a service but not yet said they want to book. Ask 'Would you like to book an appointment?' Do NOT show time slots until they say yes."
+                tz = ZoneInfo("Asia/Karachi")
+                now_local = datetime.now(timezone.utc).astimezone(tz)
+                today_str = now_local.strftime("%A, %B %d, %Y")
+                base += (
+                    f"\n\nTODAY'S DATE: {today_str}. Use this date context. "
+                    "When the customer says they want to book, you MUST list the AVAILABLE TIME SLOTS below and ask which slot they prefer. "
+                    "When they have not yet said they want to book, ask 'Would you like to book an appointment?' and do NOT show time slots yet. "
+                    "List ONLY the following slots EXACTLY as written, with the same numbers and full date/time. "
+                    "Do NOT make up dates or times. Do NOT confirm a booking until the customer has chosen a specific slot (by number or date/time).\n\n"
+                    "AVAILABLE TIME SLOTS:\n"
+                    + slots_text
+                )
+            else:
+                base += "\n\nThe customer has selected a service. Ask 'Would you like to book an appointment?' (No slots available to show yet.)"
 
         return base
 
@@ -431,8 +492,6 @@ Keep responses concise and friendly. After collecting pet details, list services
         if not state.get("lead_qualified"):
             return {}
         if state.get("appointment_booked"):
-            return {}
-        if state.get("service_selected"):
             return {}
         messages = state.get("messages", [])
         if not messages:
@@ -515,21 +574,19 @@ Return only the service name or NONE, nothing else."""
             logger.error(f"Traceback: {traceback.format_exc()}")
             return {}
 
-    def _user_wants_to_book(self, messages: list) -> bool:
-        """Check if the last user message indicates they want to book an appointment."""
-        booking_phrases = (
-            "book", "schedule", "yes", "yeah", "sure", "please", "i'd like",
-            "i would like", "let's book", "lets book", "appointment",
-        )
-        for msg in reversed(messages):
-            if msg.get("role") == "user":
-                content = (msg.get("content") or "").strip().lower()
-                return any(phrase in content for phrase in booking_phrases)
-        return False
+    def _format_single_slot(self, start_utc, end_utc, tz: ZoneInfo) -> str:
+        """Format one slot as: Day, Date — Start time to End time (Timezone)."""
+        start_local = start_utc.astimezone(tz)
+        end_local = end_utc.astimezone(tz)
+        day_date = start_local.strftime("%A, %B %d, %Y")
+        start_time = start_local.strftime("%I:%M %p").lstrip("0")
+        end_time = end_local.strftime("%I:%M %p").lstrip("0")
+        tz_name = str(tz)
+        return f"{day_date} — {start_time} to {end_time} ({tz_name})"
 
     def _format_available_slots_for_prompt(self) -> str:
         """Fetch available slots from Calendar and format for the system prompt.
-        Displays times in Asia/Karachi (booking hours Mon-Sat 9:00-18:00).
+        Displays upcoming slots with day, date, time, and timezone (Asia/Karachi).
         """
         if not self.calendar_service:
             return ""
@@ -537,15 +594,31 @@ Return only the service name or NONE, nothing else."""
         if not slots:
             return "No slots available in the next 7 days."
         tz = ZoneInfo("Asia/Karachi")
-        lines = []
-        for start_utc, end_utc in slots:
-            start_local = start_utc.astimezone(tz)
-            end_local = end_utc.astimezone(tz)
-            lines.append(
-                f"- {start_local.strftime('%A %Y-%m-%d %H:%M')} to "
-                f"{end_local.strftime('%H:%M')} (Asia/Karachi)"
-            )
+        header = "Upcoming available slots (all times in Asia/Karachi):"
+        lines = [header, ""]
+        for index, (start_utc, end_utc) in enumerate(slots, start=1):
+            lines.append(f"  {index}. {self._format_single_slot(start_utc, end_utc, tz)}")
         return "\n".join(lines)
+
+    def sync_to_sheets_node(self, state: AgentState) -> Dict:
+        """Run qualify_lead, select_service, and book_appointment in sequence so any user
+        update (name, phone, pet, service, slot) is reflected in sheets at any point.
+        """
+        merged: Dict = {}
+        for node_fn in (
+            self.qualify_lead_node,
+            self.select_service_node,
+            self.book_appointment_node,
+        ):
+            try:
+                result = node_fn(state)
+                if result:
+                    state = {**state, **result}
+                    merged.update(result)
+            except Exception as e:
+                logger.error(f"Error in sync_to_sheets step {node_fn.__name__}: {e}")
+                logger.error(f"Traceback: {traceback.format_exc()}")
+        return merged
 
     def book_appointment_node(self, state: AgentState) -> Dict:
         """If user chose a slot, book it: Calendar event, Appointments sheet, set lead status = booked."""
@@ -596,12 +669,12 @@ Return only the service name or NONE, nothing else."""
         slots = self.calendar_service.list_available_slots()
         if not slots:
             return {}
-        # Parse last user message for chosen slot (date/time)
         last_user_content = ""
         for m in reversed(messages):
             if m.get("role") == "user":
                 last_user_content = m.get("content", "")
                 break
+        # Only book when the user has chosen a specific slot (LLM extraction; returns None if no slot chosen).
         chosen_slot = self._extract_chosen_slot_from_message(last_user_content, slots)
         if not chosen_slot:
             return {}
@@ -619,8 +692,11 @@ Return only the service name or NONE, nothing else."""
             calendar_event_id=event_id or "",
         )
         self.sheets_service.update_lead_status(user_id, "booked")
-        start_local = start_dt.astimezone(ZoneInfo("Asia/Karachi"))
-        confirmation = f"I've booked your appointment for {start_local.strftime('%A, %B %d at %H:%M')} (Asia/Karachi). See you then!"
+        tz = ZoneInfo("Asia/Karachi")
+        start_local = start_dt.astimezone(tz)
+        day_date = start_local.strftime("%A, %B %d, %Y")
+        time_str = start_local.strftime("%I:%M %p").lstrip("0")
+        confirmation = f"I've booked your appointment for {day_date} at {time_str} ({tz}). See you then!"
         new_messages = list(messages)
         if new_messages and new_messages[-1].get("role") == "assistant":
             new_messages[-1] = {"role": "assistant", "content": confirmation}
@@ -637,16 +713,17 @@ Return only the service name or NONE, nothing else."""
             return None
         tz = ZoneInfo("Asia/Karachi")
         slots_desc = "\n".join(
-            f"{i+1}. {start.astimezone(tz).strftime('%A %Y-%m-%d %H:%M')} to "
-            f"{end.astimezone(tz).strftime('%H:%M')} (Asia/Karachi)"
+            f"{i+1}. {self._format_single_slot(start, end, tz)}"
             for i, (start, end) in enumerate(slots)
         )
-        prompt = f"""The user chose an appointment time. Their message: "{message}"
+        prompt = f"""The user is replying about an appointment. Their message: "{message}"
 
-Available slots (each line is one slot):
+Available slots (each line is one slot, same order as shown to the user):
 {slots_desc}
 
-Return ONLY the number (1 to {len(slots)}) of the slot they chose, or 0 if unclear. One digit only."""
+Return ONLY the number (1 to {len(slots)}) of the slot they chose, or 0 if they did not choose a specific slot.
+If the user only said they want to book (e.g. "yes", "sure", "please", "ok") but did NOT pick a slot number or date/time, return 0.
+One digit only."""
         try:
             response = self.llm.invoke([HumanMessage(content=prompt)])
             text = (response.content or "").strip()

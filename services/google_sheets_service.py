@@ -274,7 +274,7 @@ class GoogleSheetsService:
         for r, c, v in updates:
             leads_sheet.update_cell(r, c, v)
         
-        # Add a pet row when we have at least one pet detail
+        # Add or update a pet row when we have at least one pet detail
         has_pet_info = any([
             (pet_name or "").strip(),
             (species or "").strip(),
@@ -285,21 +285,69 @@ class GoogleSheetsService:
         ])
         if has_pet_info and lead_id:
             pets_sheet = self._get_or_create_sheet(spreadsheet, "Pets", PETS_HEADERS)
-            pet_id = str(uuid.uuid4())
-            pet_row = [
-                lead_id,
-                pet_id,
-                (pet_name or "").strip(),
-                (species or "").strip(),
-                (pet_breed or "").strip(),
-                (pet_weight or "").strip(),
-                (pet_age or "").strip(),
-                (pet_coat or "").strip(),
-                "",
-            ]
-            pets_sheet.append_row(pet_row)
-            logger.info(f"Qualified lead for discord_user_id {user_id}, added pet {pet_id}")
+            pet_headers = pets_sheet.row_values(1)
+            if not pet_headers:
+                pet_headers = PETS_HEADERS
+            lead_id_col = self._column_index_for_header(pet_headers, "lead_id")
+            if lead_id_col is None:
+                lead_id_col = 1
+            existing_pet_rows = self._find_pet_rows_for_lead(pets_sheet, lead_id, lead_id_col)
+            if existing_pet_rows:
+                # Update the first existing pet row so we do not duplicate
+                pet_row_num = min(existing_pet_rows)
+                updates = []
+                if pet_name is not None and "pet_name" in pet_headers:
+                    updates.append((pet_row_num, pet_headers.index("pet_name") + 1, (pet_name or "").strip()))
+                if species is not None and "species" in pet_headers:
+                    updates.append((pet_row_num, pet_headers.index("species") + 1, (species or "").strip()))
+                if pet_breed is not None and "breed" in pet_headers:
+                    updates.append((pet_row_num, pet_headers.index("breed") + 1, (pet_breed or "").strip()))
+                if pet_weight is not None and "weight_kg" in pet_headers:
+                    updates.append((pet_row_num, pet_headers.index("weight_kg") + 1, (pet_weight or "").strip()))
+                if pet_age is not None and "age_years" in pet_headers:
+                    updates.append((pet_row_num, pet_headers.index("age_years") + 1, (pet_age or "").strip()))
+                if pet_coat is not None and "coat_condition" in pet_headers:
+                    updates.append((pet_row_num, pet_headers.index("coat_condition") + 1, (pet_coat or "").strip()))
+                for r, c, v in updates:
+                    pets_sheet.update_cell(r, c, v)
+                logger.info(f"Updated existing pet for lead {lead_id} (discord_user_id {user_id})")
+            else:
+                pet_id = str(uuid.uuid4())
+                pet_row = [
+                    lead_id,
+                    pet_id,
+                    (pet_name or "").strip(),
+                    (species or "").strip(),
+                    (pet_breed or "").strip(),
+                    (pet_weight or "").strip(),
+                    (pet_age or "").strip(),
+                    (pet_coat or "").strip(),
+                    "",
+                ]
+                pets_sheet.append_row(pet_row)
+                logger.info(f"Qualified lead for discord_user_id {user_id}, added pet {pet_id}")
         return True
+
+    def _column_index_for_header(self, headers: List[str], header_name: str) -> Optional[int]:
+        """Return 1-based column index for header, or None if not found."""
+        header_lower = header_name.strip().lower()
+        for idx, h in enumerate(headers):
+            if h and str(h).strip().lower() == header_lower:
+                return idx + 1
+        return None
+
+    def _find_pet_rows_for_lead(self, pets_sheet, lead_id: str, lead_id_col: int) -> List[int]:
+        """Return list of row numbers (data rows only) where lead_id column equals lead_id."""
+        try:
+            col_vals = pets_sheet.col_values(lead_id_col)
+            return [
+                row_num
+                for row_num, val in enumerate(col_vals, start=1)
+                if row_num > 1 and str(val).strip() == str(lead_id).strip()
+            ]
+        except Exception as e:
+            logger.warning(f"Error finding pet rows for lead {lead_id}: {e}")
+            return []
 
     def _generate_appt_id(self) -> str:
         """Generate short appointment id like APPT3D8W3Z."""
