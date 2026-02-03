@@ -1,6 +1,4 @@
-"""MCP agent implementation (placeholder for future implementation)."""
-# This will be implemented in the future
-# from agents.mcp_agent.agent import MCPAgent
+"""MCP agent implementation using Pydantic AI and FastMCP servers (lead, services, booking)."""
+from agents.mcp_agent.agent import MCPAgent, create_grooming_agent
 
-# __all__ = ["MCPAgent"]
-
+__all__ = ["MCPAgent", "create_grooming_agent"]

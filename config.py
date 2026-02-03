@@ -9,13 +9,14 @@ load_dotenv()
 
 class Config:
     """Centralized configuration class following SRP."""
-    
+
     GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
     DISCORD_BOT_TOKEN = os.getenv("DISCORD_BOT_TOKEN")
     GOOGLE_SHEETS_ID = os.getenv("GOOGLE_SHEETS_ID")
     GOOGLE_CALENDAR_ID = os.getenv("GOOGLE_CALENDAR_ID")
     GOOGLE_CREDENTIALS_FILE = os.getenv("GOOGLE_CREDENTIALS_FILE")
     GOOGLE_SERVICE_ACCOUNT_JSON = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON")
+    AGENT_TYPE = os.getenv("AGENT_TYPE", "langgraph").strip().lower()
     
     @classmethod
     def validate(cls) -> bool:

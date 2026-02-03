@@ -7,7 +7,7 @@ import string
 import traceback
 import uuid
 from datetime import datetime
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 import gspread
 from google.oauth2.service_account import Credentials
 
@@ -420,6 +420,86 @@ class GoogleSheetsService:
             logger.error(f"Error getting appointment for lead {lead_id}: {e}")
             return None
 
+    def get_lead_id_for_user(self, user_id: str) -> Optional[str]:
+        """Return the lead_id for the most recent lead row matching discord_user_id.
+
+        Args:
+            user_id: Discord user ID (discord_user_id column).
+
+        Returns:
+            lead_id string or None if not found.
+        """
+        try:
+            spreadsheet = self.client.open_by_key(self.sheets_id)
+            leads_sheet = spreadsheet.worksheet("Leads")
+            headers = leads_sheet.row_values(1)
+            cells = leads_sheet.findall(str(user_id))
+            if not cells:
+                discord_col = None
+                for idx, header in enumerate(headers):
+                    if header and str(header).strip().lower() == "discord_user_id":
+                        discord_col = idx + 1
+                        break
+                if not discord_col:
+                    return None
+                from gspread.cell import Cell
+                all_vals = leads_sheet.col_values(discord_col)
+                cells = [
+                    Cell(row_num, discord_col, str(user_id))
+                    for row_num, val in enumerate(all_vals, start=1)
+                    if row_num > 1 and str(val).strip() == str(user_id).strip()
+                ]
+            if not cells:
+                return None
+            row_num = max(cell.row for cell in cells)
+            row_vals = leads_sheet.row_values(row_num)
+            padded = row_vals + [""] * (len(headers) - len(row_vals))
+            lead_row = dict(zip(headers, padded))
+            return lead_row.get("lead_id")
+        except Exception as e:
+            logger.error(f"Error getting lead_id for user {user_id}: {e}")
+            return None
+
+    def get_lead_status(self, user_id: str) -> Optional[str]:
+        """Return the status of the most recent lead for this user (e.g. 'initiated', 'qualified', 'booked').
+
+        Args:
+            user_id: Discord user ID.
+
+        Returns:
+            Status string or None if no lead found.
+        """
+        try:
+            spreadsheet = self.client.open_by_key(self.sheets_id)
+            leads_sheet = spreadsheet.worksheet("Leads")
+            headers = leads_sheet.row_values(1)
+            cells = leads_sheet.findall(str(user_id))
+            if not cells:
+                discord_col = None
+                for idx, header in enumerate(headers):
+                    if header and str(header).strip().lower() == "discord_user_id":
+                        discord_col = idx + 1
+                        break
+                if not discord_col:
+                    return None
+                from gspread.cell import Cell
+                all_vals = leads_sheet.col_values(discord_col)
+                cells = [
+                    Cell(row_num, discord_col, str(user_id))
+                    for row_num, val in enumerate(all_vals, start=1)
+                    if row_num > 1 and str(val).strip() == str(user_id).strip()
+                ]
+            if not cells:
+                return None
+            row_num = max(cell.row for cell in cells)
+            row_vals = leads_sheet.row_values(row_num)
+            padded = row_vals + [""] * (len(headers) - len(row_vals))
+            lead_row = dict(zip(headers, padded))
+            return lead_row.get("status")
+        except Exception as e:
+            logger.error(f"Error getting lead status for user {user_id}: {e}")
+            return None
+
     def update_appointment_service(self, lead_id: str, service_id: str) -> bool:
         """Update the service_id for the most recent appointment of a lead. Returns True if updated."""
         try:
@@ -603,6 +683,29 @@ class GoogleSheetsService:
                 if val is not None and str(val).strip():
                     return str(val).strip()
         return f"SVC{str(index + 1).zfill(3)}"
+
+    def get_service_with_id(self, user_input: str) -> Optional[Tuple[str, Dict]]:
+        """Find service by name or ID and return (service_id, record). Single call for MCP tools."""
+        record = self.get_service_by_name_or_id(user_input)
+        if not record:
+            return None
+        services_list = self.get_services()
+        name_keys = (SERVICE_TITLE_KEY, "service name", "name", "service_name", "service")
+        record_name = None
+        for key_lower, key_orig in {str(k).strip().lower(): k for k in record.keys()}.items():
+            if key_lower in name_keys:
+                record_name = str(record.get(key_orig, "")).strip()
+                break
+        index = 0
+        for idx, rec in enumerate(services_list):
+            if not isinstance(rec, dict):
+                continue
+            for k_l, k_o in {str(k).strip().lower(): k for k in rec.keys()}.items():
+                if k_l in name_keys and str(rec.get(k_o, "")).strip() == record_name:
+                    index = idx
+                    break
+        service_id = self.get_service_id_from_record(record, index)
+        return (service_id, record)
     
     def _get_service_account_email(self) -> Optional[str]:
         """Get the service account email from credentials.

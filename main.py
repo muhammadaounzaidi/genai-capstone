@@ -30,8 +30,12 @@ def main():
         logger.error(error_msg)
         sys.exit(1)
     
-    # Create and run bot
-    bot = GroomingBot()
+    # Create and run bot (set AGENT_TYPE=mcp in .env to use Pydantic AI + MCP instead of LangGraph)
+    agent_type = getattr(Config, "AGENT_TYPE", "langgraph") or "langgraph"
+    if agent_type not in ("langgraph", "mcp"):
+        logger.warning(f"Unknown AGENT_TYPE={agent_type}, using langgraph")
+        agent_type = "langgraph"
+    bot = GroomingBot(agent_type=agent_type)
     try:
         bot.run(Config.DISCORD_BOT_TOKEN)
     except Exception as e:

@@ -5,6 +5,7 @@ import discord
 from discord.ext import commands, tasks
 from agents.base import BaseAgent
 from agents.langgraph_agent import LangGraphAgent
+from agents.mcp_agent import MCPAgent
 from services.google_sheets_service import GoogleSheetsService
 from services.google_calendar_service import GoogleCalendarService
 from config import Config
@@ -61,8 +62,7 @@ class GroomingBot(commands.Bot):
         if agent_type == "langgraph":
             return LangGraphAgent(self.sheets_service, self.calendar_service)
         elif agent_type == "mcp":
-            # Future: return MCPAgent(self.sheets_service)
-            raise NotImplementedError("MCP agent not yet implemented")
+            return MCPAgent(self.sheets_service, self.calendar_service)
         else:
             raise ValueError(f"Unknown agent type: {agent_type}")
     
