@@ -46,7 +46,7 @@ def create_booking_mcp_server(
     calendar_service: Optional[GoogleCalendarService],
 ) -> FastMCP:
     """Create FastMCP server with booking endpoints."""
-    mcp = FastMCP(name="grooming-booking", description="Appointment booking for Pawsitive Grooming")
+    mcp = FastMCP(name="grooming-booking", instructions="Appointment booking for Pawsitive Grooming")
 
     @mcp.tool(
         name="booking_list_available_slots",

@@ -12,7 +12,7 @@ logger = logging.getLogger(__name__)
 
 def create_lead_mcp_server(sheets_service: GoogleSheetsService) -> FastMCP:
     """Create FastMCP server with lead endpoints."""
-    mcp = FastMCP(name="grooming-lead", description="Lead management for Pawsitive Grooming")
+    mcp = FastMCP(name="grooming-lead", instructions="Lead management for Pawsitive Grooming")
 
     @mcp.tool(
         name="lead_create_lead",
